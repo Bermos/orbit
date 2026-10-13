@@ -24,6 +24,8 @@ services:
     environment:
       ORBIT_DATABASE_URL: postgres://orbit:orbit@postgres:5432/orbit?sslmode=disable
       ORBIT_BASE_URL: http://localhost:8080
+      # Optional: agents answer with a built-in test model without it.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       - "8080:8080"
     volumes:

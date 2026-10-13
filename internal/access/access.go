@@ -94,3 +94,24 @@ func (r Resolver) AppRole(ctx context.Context, userID, appKey string) (Role, err
 	}
 	return role, nil
 }
+
+// Audience is the role every signed-in user has on every application
+// (internal visibility). Content an agent may show in a shared channel is
+// limited to it, because everyone who can read the channel has at least this.
+// When applications can be made private, this becomes the role every member
+// of the channel shares instead of a constant.
+const Audience = Reader
+
+// Min returns the lowest of the roles. An agent acting for a user gets the
+// minimum of the user's role, its own and, in a shared channel, the
+// audience's, so neither the user nor the agent can use the other to reach
+// more than they could alone.
+func Min(roles ...Role) Role {
+	lowest := Owner
+	for _, r := range roles {
+		if r < lowest {
+			lowest = r
+		}
+	}
+	return lowest
+}

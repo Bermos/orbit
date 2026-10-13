@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, type Message } from '../api'
 import { subscribe } from '../realtime'
+import { useAgents } from '../stores/agents'
+import { useSession } from '../stores/session'
 import { useToasts } from '../stores/toast'
 import { useTodos } from '../stores/todos'
 import Composer from './Composer.vue'
@@ -19,6 +21,8 @@ const route = useRoute()
 const router = useRouter()
 const toasts = useToasts()
 const todos = useTodos()
+const agents = useAgents()
+const session = useSession()
 
 const messages = ref<Message[]>([])
 const thread = ref<Message[] | null>(null)
@@ -30,6 +34,7 @@ const linksFor = ref<Message | null>(null)
 const list = ref<HTMLElement | null>(null)
 
 let unsub: (() => void) | null = null
+let unsubPrivate: (() => void) | null = null
 
 function replace(arr: Message[], m: Message) {
   const i = arr.findIndex((x) => x.id === m.id)
@@ -38,6 +43,7 @@ function replace(arr: Message[], m: Message) {
 }
 
 function onEvent(type: string, m: Message) {
+  if (m.channel_id !== props.channelId) return
   if (type === 'message.created') {
     if (!m.thread_id) {
       if (!replace(messages.value, m)) {
@@ -84,6 +90,14 @@ async function load() {
   loading.value = true
   unsub?.()
   unsub = subscribe('channel:' + props.channelId, onEvent)
+  // Private messages (and agent answers to them) arrive on the user's own
+  // topic, never on the channel's.
+  unsubPrivate?.()
+  if (session.user) {
+    unsubPrivate = subscribe('user:' + session.user.id, (type, data) => {
+      if (type.startsWith('message.')) onEvent(type, data)
+    })
+  }
   messages.value = await api.messages(props.channelId)
   loading.value = false
   await applyDeepLink()
@@ -100,13 +114,23 @@ async function applyDeepLink() {
 
 watch(() => props.channelId, load, { immediate: true })
 watch(() => [route.query.message, route.query.thread], () => !loading.value && applyDeepLink())
-onBeforeUnmount(() => unsub?.())
+onBeforeUnmount(() => {
+  unsub?.()
+  unsubPrivate?.()
+})
 
-async function send(body: string, inThread: boolean) {
+const threadPrivate = computed(() => !!thread.value?.[0]?.private)
+
+async function send(body: string, isPrivate: boolean, inThread: boolean) {
   sending.value = true
   try {
-    const m = await api.postMessage(props.channelId, { body, thread_id: inThread ? threadId.value : null })
-    onEvent('message.created', m)
+    const m = await api.postMessage(props.channelId, { body, thread_id: inThread ? threadId.value : null, private: isPrivate })
+    // A realtime event may have delivered a fresher copy already (with an
+    // agent's reply counted); keep that one.
+    const list = m.thread_id ? thread.value : messages.value
+    if (!list?.some((x) => x.id === m.id)) onEvent('message.created', m)
+    // Agents answer in the thread of the message that asked; open it.
+    if (!inThread && agents.mentioned(body).length) await openThread(m.id)
   } catch (e) {
     toasts.error(e)
   } finally {
@@ -142,7 +166,7 @@ async function addTodo(m: Message) {
           @links="linksFor = m"
         />
       </div>
-      <Composer :busy="sending" @send="send($event, false)" />
+      <Composer :busy="sending" @send="(body, priv) => send(body, priv, false)" />
     </div>
     <aside v-if="threadId" class="thread">
       <header>
@@ -164,7 +188,7 @@ async function addTodo(m: Message) {
           />
         </template>
       </div>
-      <Composer placeholder="Reply in thread" :busy="sending" @send="send($event, true)" />
+      <Composer placeholder="Reply in thread" :busy="sending" :force-private="threadPrivate" @send="(body, priv) => send(body, priv, true)" />
     </aside>
     <CreateIssueDialog v-if="issueSource" :source="issueSource" :default-app="appKey" @close="issueSource = null" />
     <LinksDialog v-if="linksFor" :target="{ type: 'message', id: linksFor.id }" @close="linksFor = null" />

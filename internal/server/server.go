@@ -33,11 +33,16 @@ type Server struct {
 	Web fs.FS
 	// BaseURL is the externally visible URL, used for clone URLs.
 	BaseURL string
+
+	agents *agentService
+	// internal serves the authenticated API in-process, so agent tools and
+	// confirmed proposals go through exactly the checks people go through.
+	internal http.Handler
 }
 
 // New creates a Server.
 func New(db *pgxpool.Pool, git gitrepo.Store, web fs.FS, baseURL string) *Server {
-	return &Server{
+	s := &Server{
 		DB:      db,
 		Git:     git,
 		Hub:     realtime.NewHub(),
@@ -45,6 +50,10 @@ func New(db *pgxpool.Pool, git gitrepo.Store, web fs.FS, baseURL string) *Server
 		Web:     web,
 		BaseURL: strings.TrimRight(baseURL, "/"),
 	}
+	internal := chi.NewRouter()
+	internal.Route("/api/v1", s.userRoutes)
+	s.internal = internal
+	return s
 }
 
 // Routes builds the HTTP handler.
@@ -70,52 +79,7 @@ func (s *Server) Routes() http.Handler {
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireUser)
-			r.Post("/auth/logout", s.handle(s.logout))
-			r.Get("/me", s.handle(s.me))
-			r.Get("/me/teams", s.handle(s.myTeams))
-			r.Get("/users", s.handle(s.listUsers))
-
-			r.Get("/teams", s.handle(s.listTeams))
-			r.Post("/teams", s.handle(s.createTeam))
-			r.Get("/teams/{teamID}", s.handle(s.getTeam))
-			r.Patch("/teams/{teamID}", s.handle(s.updateTeam))
-			r.Get("/teams/{teamID}/space", s.handle(s.teamSpace))
-			r.Put("/teams/{teamID}/members/{userID}", s.handle(s.putTeamMember))
-			r.Delete("/teams/{teamID}/members/{userID}", s.handle(s.deleteTeamMember))
-
-			r.Get("/apps", s.handle(s.listApps))
-			r.Post("/apps", s.handle(s.createApp))
-			r.Get("/apps/{app}", s.handle(s.getApp))
-			r.Patch("/apps/{app}", s.handle(s.updateApp))
-			r.Put("/apps/{app}/teams/{teamID}", s.handle(s.putAppTeam))
-			r.Delete("/apps/{app}/teams/{teamID}", s.handle(s.deleteAppTeam))
-
-			r.Post("/apps/{app}/repos", s.handle(s.createRepo))
-			r.Get("/apps/{app}/repos/{repo}", s.handle(s.getRepo))
-			r.Get("/apps/{app}/repos/{repo}/tree", s.handle(s.repoTree))
-			r.Get("/apps/{app}/repos/{repo}/blob", s.handle(s.repoBlob))
-			r.Get("/apps/{app}/repos/{repo}/commits", s.handle(s.repoCommits))
-
-			r.Get("/apps/{app}/issues", s.handle(s.listIssues))
-			r.Post("/apps/{app}/issues", s.handle(s.createIssue))
-			r.Get("/apps/{app}/issues/{number}", s.handle(s.getIssue))
-			r.Patch("/apps/{app}/issues/{number}", s.handle(s.updateIssue))
-
-			r.Get("/channels", s.handle(s.listChannels))
-			r.Post("/channels", s.handle(s.createChannel))
-			r.Get("/channels/{channelID}", s.handle(s.getChannel))
-			r.Get("/channels/{channelID}/messages", s.handle(s.listMessages))
-			r.Post("/channels/{channelID}/messages", s.handle(s.postMessage))
-			r.Get("/messages/{messageID}", s.handle(s.getMessage))
-
-			r.Get("/todos", s.handle(s.listTodos))
-			r.Post("/todos", s.handle(s.createTodo))
-			r.Patch("/todos/{todoID}", s.handle(s.updateTodo))
-			r.Delete("/todos/{todoID}", s.handle(s.deleteTodo))
-
-			r.Get("/links", s.handle(s.listLinks))
-			r.Post("/links", s.handle(s.createLink))
-
+			s.userRoutes(r)
 			r.Get("/events", s.serveEvents)
 		})
 		r.NotFound(func(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +91,62 @@ func (s *Server) Routes() http.Handler {
 		r.NotFound(s.serveWeb)
 	}
 	return r
+}
+
+// userRoutes are the API endpoints for a signed-in user.
+func (s *Server) userRoutes(r chi.Router) {
+	r.Post("/auth/logout", s.handle(s.logout))
+	r.Get("/me", s.handle(s.me))
+	r.Get("/me/teams", s.handle(s.myTeams))
+	r.Get("/users", s.handle(s.listUsers))
+
+	r.Get("/teams", s.handle(s.listTeams))
+	r.Post("/teams", s.handle(s.createTeam))
+	r.Get("/teams/{teamID}", s.handle(s.getTeam))
+	r.Patch("/teams/{teamID}", s.handle(s.updateTeam))
+	r.Get("/teams/{teamID}/space", s.handle(s.teamSpace))
+	r.Put("/teams/{teamID}/members/{userID}", s.handle(s.putTeamMember))
+	r.Delete("/teams/{teamID}/members/{userID}", s.handle(s.deleteTeamMember))
+
+	r.Get("/apps", s.handle(s.listApps))
+	r.Post("/apps", s.handle(s.createApp))
+	r.Get("/apps/{app}", s.handle(s.getApp))
+	r.Patch("/apps/{app}", s.handle(s.updateApp))
+	r.Put("/apps/{app}/teams/{teamID}", s.handle(s.putAppTeam))
+	r.Delete("/apps/{app}/teams/{teamID}", s.handle(s.deleteAppTeam))
+
+	r.Post("/apps/{app}/repos", s.handle(s.createRepo))
+	r.Get("/apps/{app}/repos/{repo}", s.handle(s.getRepo))
+	r.Get("/apps/{app}/repos/{repo}/tree", s.handle(s.repoTree))
+	r.Get("/apps/{app}/repos/{repo}/blob", s.handle(s.repoBlob))
+	r.Get("/apps/{app}/repos/{repo}/commits", s.handle(s.repoCommits))
+
+	r.Get("/apps/{app}/issues", s.handle(s.listIssues))
+	r.Post("/apps/{app}/issues", s.handle(s.createIssue))
+	r.Get("/apps/{app}/issues/{number}", s.handle(s.getIssue))
+	r.Patch("/apps/{app}/issues/{number}", s.handle(s.updateIssue))
+
+	r.Get("/channels", s.handle(s.listChannels))
+	r.Post("/channels", s.handle(s.createChannel))
+	r.Get("/channels/{channelID}", s.handle(s.getChannel))
+	r.Get("/channels/{channelID}/messages", s.handle(s.listMessages))
+	r.Post("/channels/{channelID}/messages", s.handle(s.postMessage))
+	r.Get("/messages/{messageID}", s.handle(s.getMessage))
+
+	r.Get("/todos", s.handle(s.listTodos))
+	r.Post("/todos", s.handle(s.createTodo))
+	r.Patch("/todos/{todoID}", s.handle(s.updateTodo))
+	r.Delete("/todos/{todoID}", s.handle(s.deleteTodo))
+
+	r.Get("/links", s.handle(s.listLinks))
+	r.Post("/links", s.handle(s.createLink))
+
+	r.Get("/search", s.handle(s.search))
+
+	r.Get("/agents", s.handle(s.listAgents))
+	r.Get("/agent-runs/{runID}", s.handle(s.getAgentRun))
+	r.Post("/agent-proposals/{proposalID}/apply", s.handle(s.applyProposal))
+	r.Post("/agent-proposals/{proposalID}/dismiss", s.handle(s.dismissProposal))
 }
 
 // serveWeb serves the single-page app, falling back to index.html for

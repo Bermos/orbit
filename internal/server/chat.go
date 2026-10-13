@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -37,6 +39,7 @@ type Author struct {
 	ID          string `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
+	Kind        string `json:"kind"` // "human" or "agent"
 }
 
 type Message struct {
@@ -46,26 +49,55 @@ type Message struct {
 	Author      *Author         `json:"author"`
 	Body        string          `json:"body"`
 	Attachments json.RawMessage `json:"attachments"`
-	ReplyCount  int             `json:"reply_count"`
-	LinkCount   int             `json:"link_count"`
-	CreatedAt   time.Time       `json:"created_at"`
+	// Private messages are visible only to one user ("answer only me").
+	Private    bool      `json:"private"`
+	ReplyCount int       `json:"reply_count"`
+	LinkCount  int       `json:"link_count"`
+	CreatedAt  time.Time `json:"created_at"`
+
+	visibleTo *string
 }
 
-const messageCols = `m.id, m.channel_id, m.thread_id, u.id, u.username, u.display_name, m.body, m.attachments,
-	(select count(*) from messages r where r.thread_id = m.id),
+// messageCols selects messages as one viewer sees them: reply counts include
+// only replies the viewer can see. viewer is the placeholder bound to the
+// viewer's user ID, or to nil for what everyone sees.
+func messageCols(viewer string) string {
+	return `m.id, m.channel_id, m.thread_id, u.id, u.username, u.display_name, u.kind, m.body, m.attachments, m.visible_to,
+	(select count(*) from messages r where r.thread_id = m.id and (r.visible_to is null or r.visible_to = ` + viewer + `::uuid)),
 	(select count(*) from links l where (l.to_type = 'message' and l.to_id = m.id::text) or (l.from_type = 'message' and l.from_id = m.id::text)),
 	m.created_at`
+}
+
+// visibleTo is the condition for messages the viewer may see.
+func visibleTo(viewer string) string {
+	return `(m.visible_to is null or m.visible_to = ` + viewer + `::uuid)`
+}
+
+// viewerArg binds a viewer ID; "" means the public view.
+func viewerArg(id string) any {
+	if id == "" {
+		return nil
+	}
+	return id
+}
 
 func scanMessages(rows pgx.Rows) ([]Message, error) {
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Message, error) {
 		var m Message
-		var uid, uname, dname *string
-		err := row.Scan(&m.ID, &m.ChannelID, &m.ThreadID, &uid, &uname, &dname, &m.Body, &m.Attachments, &m.ReplyCount, &m.LinkCount, &m.CreatedAt)
+		var uid, uname, dname, kind *string
+		err := row.Scan(&m.ID, &m.ChannelID, &m.ThreadID, &uid, &uname, &dname, &kind, &m.Body, &m.Attachments, &m.visibleTo,
+			&m.ReplyCount, &m.LinkCount, &m.CreatedAt)
 		if uid != nil {
-			m.Author = &Author{ID: *uid, Username: *uname, DisplayName: *dname}
+			m.Author = &Author{ID: *uid, Username: *uname, DisplayName: *dname, Kind: *kind}
 		}
+		m.Private = m.visibleTo != nil
 		return m, err
 	})
+}
+
+// visibleFor reports whether the user may see the message.
+func (m Message) visibleFor(userID string) bool {
+	return m.visibleTo == nil || *m.visibleTo == userID
 }
 
 func (s *Server) loadChannel(ctx context.Context, r *http.Request, id string) (Channel, error) {
@@ -163,13 +195,14 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	me := currentUser(r).ID
 	var rows pgx.Rows
 	if thread := r.URL.Query().Get("thread"); thread != "" {
-		rows, err = s.DB.Query(r.Context(), `select `+messageCols+` from messages m left join users u on u.id = m.author_id
-			where m.channel_id = $1 and (m.id = $2 or m.thread_id = $2) order by m.created_at`, ch.ID, thread)
+		rows, err = s.DB.Query(r.Context(), `select `+messageCols("$3")+` from messages m left join users u on u.id = m.author_id
+			where m.channel_id = $1 and (m.id = $2 or m.thread_id = $2) and `+visibleTo("$3")+` order by m.created_at`, ch.ID, thread, me)
 	} else {
-		rows, err = s.DB.Query(r.Context(), `select * from (select `+messageCols+` from messages m left join users u on u.id = m.author_id
-			where m.channel_id = $1 and m.thread_id is null order by m.created_at desc limit 200) x order by created_at`, ch.ID)
+		rows, err = s.DB.Query(r.Context(), `select * from (select `+messageCols("$2")+` from messages m left join users u on u.id = m.author_id
+			where m.channel_id = $1 and m.thread_id is null and `+visibleTo("$2")+` order by m.created_at desc limit 200) x order by created_at`, ch.ID, me)
 	}
 	if err != nil {
 		return err
@@ -183,19 +216,35 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Server) getMessage(w http.ResponseWriter, r *http.Request) error {
-	m, err := s.messageByID(r.Context(), chi.URLParam(r, "messageID"))
+	m, err := s.visibleMessage(r, chi.URLParam(r, "messageID"))
 	if err != nil {
-		return err
-	}
-	if _, err := s.loadChannel(r.Context(), r, m.ChannelID); err != nil {
 		return err
 	}
 	writeJSON(w, http.StatusOK, m)
 	return nil
 }
 
-func (s *Server) messageByID(ctx context.Context, id string) (Message, error) {
-	rows, err := s.DB.Query(ctx, `select `+messageCols+` from messages m left join users u on u.id = m.author_id where m.id = $1`, id)
+// visibleMessage loads a message the current user may see: its channel is
+// readable and it is not someone else's private message.
+func (s *Server) visibleMessage(r *http.Request, id string) (Message, error) {
+	u := currentUser(r)
+	m, err := s.messageByID(r.Context(), id, u.ID)
+	if err != nil {
+		return Message{}, err
+	}
+	if !m.visibleFor(u.ID) {
+		return Message{}, errNotFound
+	}
+	if _, err := s.loadChannel(r.Context(), r, m.ChannelID); err != nil {
+		return Message{}, err
+	}
+	return m, nil
+}
+
+// messageByID loads a message as viewer sees it ("" for the public view). It
+// does not check visibility; see visibleMessage.
+func (s *Server) messageByID(ctx context.Context, id, viewer string) (Message, error) {
+	rows, err := s.DB.Query(ctx, `select `+messageCols("$2")+` from messages m left join users u on u.id = m.author_id where m.id = $1`, id, viewerArg(viewer))
 	if err != nil {
 		return Message{}, err
 	}
@@ -267,10 +316,14 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 		Body     string     `json:"body"`
 		ThreadID *string    `json:"thread_id"`
 		Code     *CodeInput `json:"code"`
+		// Private keeps the message, and any agent answer to it, visible to
+		// the author only ("answer only me").
+		Private bool `json:"private"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		return err
 	}
+	u := currentUser(r)
 	in.Body = strings.TrimSpace(in.Body)
 	if in.Body == "" && in.Code == nil {
 		return badRequest("message is empty")
@@ -278,16 +331,27 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 	if in.ThreadID != nil && *in.ThreadID == "" {
 		in.ThreadID = nil
 	}
+	privateThread := false
 	if in.ThreadID != nil {
-		// Replies hang off a top-level message in the same channel.
+		// Replies hang off a top-level message in the same channel that the
+		// author can see. Replies under a private message stay private.
 		var ok bool
-		if err := s.DB.QueryRow(ctx, `select exists (select 1 from messages where id = $1 and channel_id = $2 and thread_id is null)`,
-			*in.ThreadID, ch.ID).Scan(&ok); err != nil {
-			return err
-		}
-		if !ok {
+		var rootVisibleTo *string
+		err := s.DB.QueryRow(ctx, `select true, visible_to from messages where id = $1 and channel_id = $2 and thread_id is null`,
+			*in.ThreadID, ch.ID).Scan(&ok, &rootVisibleTo)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && rootVisibleTo != nil && *rootVisibleTo != u.ID) {
 			return badRequest("thread not found in this channel")
 		}
+		if err != nil {
+			return err
+		}
+		if rootVisibleTo != nil {
+			in.Private, privateThread = true, true
+		}
+	}
+	mentioned := s.agents.mentioned(in.Body)
+	if in.Private && !privateThread && len(mentioned) == 0 {
+		return badRequest("private messages are for asking an agent: mention one, for example @assistant")
 	}
 
 	attachments := []any{}
@@ -301,15 +365,18 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 		attachments = append(attachments, att)
 	}
 
-	u := currentUser(r)
+	var visible *string
+	if in.Private {
+		visible = &u.ID
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var id string
-	if err := tx.QueryRow(ctx, `insert into messages (channel_id, thread_id, author_id, body, attachments) values ($1, $2, $3, $4, $5) returning id`,
-		ch.ID, in.ThreadID, u.ID, in.Body, attachments).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `insert into messages (channel_id, thread_id, author_id, body, attachments, visible_to) values ($1, $2, $3, $4, $5, $6) returning id`,
+		ch.ID, in.ThreadID, u.ID, in.Body, attachments, visible).Scan(&id); err != nil {
 		return err
 	}
 	if code != nil {
@@ -330,34 +397,64 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	m, err := s.messageByID(ctx, id)
+	m, err := s.messageByID(ctx, id, u.ID)
 	if err != nil {
 		return err
 	}
 	s.publishMessage(ctx, m)
+	for _, def := range mentioned {
+		if err := s.startRun(ctx, def, u, ch, m); err != nil {
+			slog.Error("start agent run", "agent", def.Name, "err", err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, m)
 	return nil
 }
 
-// publishMessage notifies channel subscribers, and refreshes the parent's
-// reply count for thread replies.
+// publishMessage notifies subscribers, and refreshes the parent's reply count
+// for thread replies. Private messages go only to their one reader.
 func (s *Server) publishMessage(ctx context.Context, m Message) {
-	s.Hub.Publish("channel:"+m.ChannelID, "message.created", m)
+	s.publishMessageEvent(ctx, "message.created", m)
 	if m.ThreadID != nil {
-		if parent, err := s.messageByID(ctx, *m.ThreadID); err == nil {
-			s.Hub.Publish("channel:"+m.ChannelID, "message.updated", parent)
+		viewer := ""
+		if m.visibleTo != nil {
+			viewer = *m.visibleTo
+		}
+		if parent, err := s.messageByID(ctx, *m.ThreadID, viewer); err == nil {
+			s.publishMessageEvent(ctx, "message.updated", parent)
+			if viewer != "" && parent.visibleTo == nil {
+				// The reader of a private reply sees a reply count that
+				// includes it; send the parent to them as well.
+				s.Hub.Publish("user:"+viewer, "message.updated", parent)
+			}
 		}
 	}
 }
 
+func (s *Server) publishMessageEvent(ctx context.Context, typ string, m Message) {
+	if m.visibleTo != nil {
+		s.Hub.Publish("user:"+*m.visibleTo, typ, m)
+		return
+	}
+	if typ == "message.updated" && m.ThreadID == nil {
+		// Recompute the public reply count: m may have been loaded for a
+		// viewer with private replies.
+		if pub, err := s.messageByID(ctx, m.ID, ""); err == nil {
+			m = pub
+		}
+	}
+	s.Hub.Publish("channel:"+m.ChannelID, typ, m)
+}
+
 // postSystemMessage adds a message without an author, used to note links
 // (for example "issue created from this conversation") where they happened.
+// visible limits it to one user, for notes in a private thread.
 func (s *Server) postSystemMessage(ctx context.Context, q interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}, channelID string, threadID *string, body string, attachments []any) (string, error) {
+}, channelID string, threadID *string, body string, attachments []any, visible *string) (string, error) {
 	var id string
-	err := q.QueryRow(ctx, `insert into messages (channel_id, thread_id, author_id, body, attachments) values ($1, $2, null, $3, $4) returning id`,
-		channelID, threadID, body, attachments).Scan(&id)
+	err := q.QueryRow(ctx, `insert into messages (channel_id, thread_id, author_id, body, attachments, visible_to) values ($1, $2, null, $3, $4, $5) returning id`,
+		channelID, threadID, body, attachments, visible).Scan(&id)
 	return id, err
 }
 

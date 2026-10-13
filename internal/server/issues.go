@@ -102,7 +102,7 @@ func (s *Server) writeIssue(w http.ResponseWriter, r *http.Request, app string, 
 	if err != nil {
 		return err
 	}
-	links, err := s.linksFor(r.Context(), Ref{Type: "issue", ID: issue.ID})
+	links, err := s.linksFor(r.Context(), Ref{Type: "issue", ID: issue.ID}, currentUser(r).ID)
 	if err != nil {
 		return err
 	}
@@ -161,11 +161,8 @@ func (s *Server) createIssue(w http.ResponseWriter, r *http.Request) error {
 		if in.Source.Type != "message" {
 			return badRequest("issues can be created from messages")
 		}
-		m, err := s.messageByID(ctx, in.Source.ID)
+		m, err := s.visibleMessage(r, in.Source.ID)
 		if err != nil {
-			return err
-		}
-		if _, err := s.loadChannel(ctx, r, m.ChannelID); err != nil {
 			return err
 		}
 		source = &m
@@ -213,12 +210,12 @@ func (s *Server) createIssue(w http.ResponseWriter, r *http.Request) error {
 			URL:      fmt.Sprintf("/apps/%s/issues/%d", app, number),
 		}
 		quote := map[string]any{"type": "entity", "entity": srcEntity, "quote": source.Body}
-		if _, err := s.postSystemMessage(ctx, tx, channelID, nil, "Created from a conversation", []any{quote}); err != nil {
+		if _, err := s.postSystemMessage(ctx, tx, channelID, nil, "Created from a conversation", []any{quote}, nil); err != nil {
 			return err
 		}
 		noteID, err = s.postSystemMessage(ctx, tx, source.ChannelID, thread,
 			fmt.Sprintf("%s created issue %s#%d from this conversation", u.DisplayName, app, number),
-			[]any{map[string]any{"type": "entity", "entity": issueEntity}})
+			[]any{map[string]any{"type": "entity", "entity": issueEntity}}, source.visibleTo)
 		if err != nil {
 			return err
 		}
@@ -227,7 +224,7 @@ func (s *Server) createIssue(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if noteID != "" {
-		if m, err := s.messageByID(ctx, noteID); err == nil {
+		if m, err := s.messageByID(ctx, noteID, ""); err == nil {
 			s.publishMessage(ctx, m)
 		}
 	}
@@ -313,7 +310,7 @@ func (s *Server) updateIssue(w http.ResponseWriter, r *http.Request) error {
 	}
 	var noteIDs []string
 	for _, e := range events {
-		id, err := s.postSystemMessage(ctx, tx, issue.ChannelID, nil, e, []any{})
+		id, err := s.postSystemMessage(ctx, tx, issue.ChannelID, nil, e, []any{}, nil)
 		if err != nil {
 			return err
 		}
@@ -323,7 +320,7 @@ func (s *Server) updateIssue(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	for _, id := range noteIDs {
-		if m, err := s.messageByID(ctx, id); err == nil {
+		if m, err := s.messageByID(ctx, id, ""); err == nil {
 			s.publishMessage(ctx, m)
 		}
 	}

@@ -52,7 +52,7 @@ func (s *Server) userBySession(ctx context.Context, token string) (User, error) 
 	err := s.DB.QueryRow(ctx, `
 		select u.id, u.username, u.display_name, u.is_admin
 		  from sessions s join users u on u.id = s.user_id
-		 where s.token_hash = $1 and s.expires_at > now()`, hashToken(token)).
+		 where s.token_hash = $1 and s.expires_at > now() and u.kind = 'human'`, hashToken(token)).
 		Scan(&u.ID, &u.Username, &u.DisplayName, &u.IsAdmin)
 	return u, err
 }
@@ -62,7 +62,7 @@ func (s *Server) userBySession(ctx context.Context, token string) (User, error) 
 func (s *Server) userByPassword(ctx context.Context, username, password string) (User, error) {
 	var u User
 	var hash string
-	err := s.DB.QueryRow(ctx, `select id, username, display_name, is_admin, password_hash from users where username = $1`,
+	err := s.DB.QueryRow(ctx, `select id, username, display_name, is_admin, password_hash from users where username = $1 and kind = 'human'`,
 		strings.ToLower(username)).Scan(&u.ID, &u.Username, &u.DisplayName, &u.IsAdmin, &hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Spend the same time as a real check so usernames cannot be probed.
@@ -147,7 +147,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) error {
 	// The first account becomes the instance admin.
 	err = s.DB.QueryRow(r.Context(), `
 		insert into users (username, display_name, password_hash, is_admin)
-		values ($1, $2, $3, not exists (select 1 from users))
+		values ($1, $2, $3, not exists (select 1 from users where kind = 'human'))
 		returning id, username, display_name, is_admin`,
 		in.Username, strings.TrimSpace(in.DisplayName), string(hash)).Scan(&u.ID, &u.Username, &u.DisplayName, &u.IsAdmin)
 	if err != nil {
@@ -189,7 +189,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) error {
-	rows, err := s.DB.Query(r.Context(), `select id, username, display_name, is_admin from users order by display_name`)
+	rows, err := s.DB.Query(r.Context(), `select id, username, display_name, is_admin from users where kind = 'human' order by display_name`)
 	if err != nil {
 		return err
 	}
