@@ -1,0 +1,34 @@
+# Local development stack: `docker compose up --build`, then open
+# http://localhost:8080 and create the first account (it becomes admin).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: orbit
+      POSTGRES_PASSWORD: orbit
+      POSTGRES_DB: orbit
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "orbit"]
+      interval: 2s
+      retries: 20
+
+  orbit:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ORBIT_DATABASE_URL: postgres://orbit:orbit@postgres:5432/orbit?sslmode=disable
+      ORBIT_BASE_URL: http://localhost:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - orbitdata:/data
+
+volumes:
+  pgdata:
+  orbitdata:
