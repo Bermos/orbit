@@ -7,7 +7,7 @@ export interface User {
   display_name: string
   is_admin: boolean
 }
-export type Author = Pick<User, 'id' | 'username' | 'display_name'>
+export type Author = Pick<User, 'id' | 'username' | 'display_name'> & { kind: 'human' | 'agent' }
 
 export interface Team {
   id: string
@@ -87,6 +87,54 @@ export interface CodeRange {
 export type Attachment =
   | { type: 'code'; ref: Ref; code: CodeRange; lines: string[]; url: string }
   | { type: 'entity'; entity: Entity; quote?: string }
+  | { type: 'agent_run'; run: AgentRun }
+  | { type: 'proposal'; proposal: Proposal }
+
+export interface Agent {
+  user_id: string
+  name: string
+  display_name: string
+  description: string
+  model: string
+  role: Role
+  apps: string[]
+  tools: string[]
+  source: string
+}
+export interface AgentStep {
+  tool: string
+  input: Record<string, unknown>
+  error?: string
+  duration_ms: number
+}
+export interface AgentRun {
+  id: string
+  agent: string
+  asker_id: string | null
+  channel_id: string
+  trigger_message_id: string | null
+  reply_message_id: string | null
+  private: boolean
+  status: 'running' | 'done' | 'failed'
+  model: string
+  steps: AgentStep[] | null
+  error?: string
+  input_tokens: number
+  output_tokens: number
+  created_at: string
+  finished_at: string | null
+}
+export interface Proposal {
+  id: string
+  run_id: string
+  kind: 'issue' | 'todo' | 'issue_comment'
+  status: 'pending' | 'applying' | 'applied' | 'dismissed'
+  summary: string
+  input: { app?: string; number?: number; title?: string; body?: string }
+  asker_id: string | null
+  result: Entity | null
+  created_at: string
+}
 
 export interface Message {
   id: string
@@ -95,6 +143,7 @@ export interface Message {
   author: Author | null
   body: string
   attachments: Attachment[]
+  private: boolean
   reply_count: number
   link_count: number
   created_at: string
@@ -247,7 +296,7 @@ export const api = {
   createChannel: (name: string, app_key: string | null) => request<Channel>('POST', '/channels', { name, app_key }),
   channel: (id: string) => request<{ channel: Channel; issue_url?: string }>('GET', `/channels/${id}`),
   messages: (channel: string, thread?: string) => request<Message[]>('GET', `/channels/${channel}/messages${q({ thread })}`),
-  postMessage: (channel: string, input: { body: string; thread_id?: string | null; code?: CodeInput }) =>
+  postMessage: (channel: string, input: { body: string; thread_id?: string | null; code?: CodeInput; private?: boolean }) =>
     request<Message>('POST', `/channels/${channel}/messages`, input),
 
   todos: () => request<Todo[]>('GET', '/todos'),
@@ -256,4 +305,9 @@ export const api = {
   deleteTodo: (id: string) => request<void>('DELETE', `/todos/${id}`),
 
   links: (ref: Ref) => request<LinkView[]>('GET', `/links${q({ type: ref.type, id: ref.id })}`),
+
+  agents: () => request<Agent[]>('GET', '/agents'),
+  agentRun: (id: string) => request<{ run: AgentRun; proposals: Proposal[] }>('GET', `/agent-runs/${id}`),
+  applyProposal: (id: string) => request<{ result: Entity }>('POST', `/agent-proposals/${id}/apply`),
+  dismissProposal: (id: string) => request<void>('POST', `/agent-proposals/${id}/dismiss`),
 }

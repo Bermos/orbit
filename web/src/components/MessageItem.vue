@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { Message } from '../api'
+import AgentRunView from './AgentRunView.vue'
 import CodeSnippet from './CodeSnippet.vue'
 import EntityChip from './EntityChip.vue'
+import ProposalCard from './ProposalCard.vue'
 
 defineProps<{ message: Message; inThread?: boolean }>()
 const emit = defineEmits<{ reply: []; todo: []; issue: []; links: [] }>()
@@ -14,11 +16,13 @@ function time(s: string) {
 </script>
 
 <template>
-  <div :id="`msg-${message.id}`" class="msg" :class="{ system: !message.author }">
-    <div class="avatar">{{ message.author ? message.author.display_name.slice(0, 1).toUpperCase() : '◎' }}</div>
+  <div :id="`msg-${message.id}`" class="msg" :class="{ system: !message.author, agent: message.author?.kind === 'agent', private: message.private }">
+    <div class="avatar">{{ message.author ? (message.author.kind === 'agent' ? '✦' : message.author.display_name.slice(0, 1).toUpperCase()) : '◎' }}</div>
     <div class="content">
       <div class="meta">
         <strong>{{ message.author?.display_name ?? 'Orbit' }}</strong>
+        <span v-if="message.author?.kind === 'agent'" class="badge accent small">agent</span>
+        <span v-if="message.private" class="badge small" title="Only you can see this">🔒 only you</span>
         <span class="muted small">{{ time(message.created_at) }}</span>
       </div>
       <div v-if="message.body" class="body">{{ message.body }}</div>
@@ -28,6 +32,10 @@ function time(s: string) {
           <EntityChip :entity="a.entity" />
           <blockquote v-if="a.quote">{{ a.quote }}</blockquote>
         </div>
+        <ProposalCard v-else-if="a.type === 'proposal'" :proposal="a.proposal" />
+      </template>
+      <template v-for="(a, i) in message.attachments" :key="'run' + i">
+        <AgentRunView v-if="a.type === 'agent_run'" :run="a.run" />
       </template>
       <div class="footer">
         <button v-if="!inThread && message.reply_count" class="ghost small replies" @click="emit('reply')">
@@ -52,6 +60,10 @@ function time(s: string) {
   display: flex; align-items: center; justify-content: center; font-weight: 650; margin-top: 2px;
 }
 .system .avatar { background: var(--surface-2); color: var(--accent); border: 1px solid var(--border); }
+.agent .avatar { background: linear-gradient(135deg, var(--accent), #2fb5a5); }
+.private { background: var(--accent-soft); }
+.private:hover { background: var(--accent-soft); }
+.meta .badge { font-size: 11px; padding: 0 6px; }
 .system .body { color: var(--muted); }
 .content { flex: 1; min-width: 0; }
 .meta { display: flex; gap: 8px; align-items: baseline; }

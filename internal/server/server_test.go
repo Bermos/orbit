@@ -19,6 +19,12 @@ import (
 // an empty, disposable database; the tests drop and recreate its schema.
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	ts, _ := newTestServerWithAPI(t)
+	return ts
+}
+
+func newTestServerWithAPI(t *testing.T) (*httptest.Server, *Server) {
+	t.Helper()
 	url := os.Getenv("ORBIT_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("ORBIT_TEST_DATABASE_URL not set")
@@ -39,7 +45,8 @@ func newTestServer(t *testing.T) *httptest.Server {
 	ts := httptest.NewServer(srv.Routes())
 	srv.BaseURL = ts.URL
 	t.Cleanup(ts.Close)
-	return ts
+	t.Cleanup(srv.WaitAgents)
+	return ts, srv
 }
 
 type client struct {

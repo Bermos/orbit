@@ -100,15 +100,11 @@ func (s *Server) createTodo(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		if e.Missing {
+		if e.Missing || !e.visibleFor(currentUser(r).ID) {
 			return badRequest(in.Source.Type + " does not exist")
 		}
 		if in.Source.Type == "message" {
-			m, err := s.messageByID(ctx, in.Source.ID)
-			if err != nil {
-				return err
-			}
-			if _, err := s.loadChannel(ctx, r, m.ChannelID); err != nil {
+			if _, err := s.visibleMessage(r, in.Source.ID); err != nil {
 				return err
 			}
 		}

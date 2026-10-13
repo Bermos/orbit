@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Bermos/orbit/internal/agent"
 	"github.com/Bermos/orbit/internal/db"
 	"github.com/Bermos/orbit/internal/gitrepo"
 	"github.com/Bermos/orbit/internal/server"
@@ -64,6 +65,9 @@ func run() error {
 		slog.Warn("web UI not built; serving the API only (run `npm run build` in web/)")
 	}
 	srv := server.New(pool, gitrepo.Store{Root: repoRoot}, ui, baseURL)
+	if err := enableAgents(ctx, srv, os.Getenv("ORBIT_AGENTS_DIR")); err != nil {
+		return err
+	}
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -84,7 +88,33 @@ func run() error {
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		return httpSrv.Shutdown(shutdown)
+		err := httpSrv.Shutdown(shutdown)
+		// ctx is done, so running agent runs are being cancelled; let them
+		// record that before the database pool closes.
+		srv.WaitAgents()
+		return err
 	}
 	return nil
+}
+
+// enableAgents loads the agent catalog (built-in agents plus files in dir)
+// and the model providers. Without ANTHROPIC_API_KEY, agents that use
+// Anthropic answer with the built-in test model so the flow still works.
+func enableAgents(ctx context.Context, srv *server.Server, dir string) error {
+	defs, problems := agent.LoadCatalog(dir)
+	for _, p := range problems {
+		slog.Warn("agent definition skipped", "err", p)
+	}
+	providers := agent.Providers{"fake": agent.Fake{}}
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		providers["anthropic"] = agent.NewAnthropic("")
+	} else {
+		slog.Warn("ANTHROPIC_API_KEY not set; agents answer with the built-in test model")
+	}
+	names := make([]string, len(defs))
+	for i, d := range defs {
+		names[i] = d.Name
+	}
+	slog.Info("agents loaded", "agents", names)
+	return srv.EnableAgents(ctx, defs, providers)
 }
