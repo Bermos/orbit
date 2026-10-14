@@ -52,9 +52,13 @@ export interface Repo {
 export interface Channel {
   id: string
   app_key: string | null
-  kind: 'chat' | 'issue'
+  kind: 'chat' | 'issue' | 'direct'
   name: string
   created_at: string
+  // Set on private chats with an agent ("direct").
+  owner_id?: string
+  agent?: string
+  last_message_at?: string
 }
 export interface AppDetail {
   application: App
@@ -438,6 +442,10 @@ export const api = {
   messages: (channel: string, thread?: string) => request<Message[]>('GET', `/channels/${channel}/messages${q({ thread })}`),
   postMessage: (channel: string, input: { body: string; thread_id?: string | null; code?: CodeInput; private?: boolean }) =>
     request<Message>('POST', `/channels/${channel}/messages`, input),
+
+  directChats: () => request<Channel[]>('GET', '/direct-chats'),
+  createDirectChat: (agent: string) => request<Channel>('POST', '/direct-chats', { agent }),
+  deleteDirectChat: (id: string) => request<void>('DELETE', `/direct-chats/${id}`),
 
   todos: () => request<Todo[]>('GET', '/todos'),
   createTodo: (input: { title?: string; source?: Ref }) => request<Todo>('POST', '/todos', input),

@@ -119,10 +119,7 @@ func (s *Server) agentJobTarget(ctx context.Context, ch Channel, trigger Message
 // one agent job and a reply in the thread that follows the job.
 func (s *Server) startAgentJob(ctx context.Context, def agent.Definition, asker User, ch Channel, trigger Message) error {
 	a := s.agents
-	root := trigger.ID
-	if trigger.ThreadID != nil {
-		root = *trigger.ThreadID
-	}
+	root := replyRoot(ch, trigger)
 	refuse := func(reason string) error {
 		id, err := s.postAgentMessage(ctx, def, ch.ID, root, "I can't start on this: "+reason+".", trigger.visibleTo)
 		if err != nil {
@@ -192,8 +189,9 @@ func (s *Server) startAgentJob(ctx context.Context, def agent.Definition, asker 
 	return s.refreshReply(ctx, runID, "message.created")
 }
 
-// postAgentMessage adds a message by an agent in a thread.
-func (s *Server) postAgentMessage(ctx context.Context, def agent.Definition, channelID, root, body string, visible *string) (string, error) {
+// postAgentMessage adds a message by an agent in a thread, or top-level when
+// root is nil.
+func (s *Server) postAgentMessage(ctx context.Context, def agent.Definition, channelID string, root *string, body string, visible *string) (string, error) {
 	var id string
 	err := s.DB.QueryRow(ctx, `insert into messages (channel_id, thread_id, author_id, body, visible_to) values ($1, $2, $3, $4, $5) returning id`,
 		channelID, root, s.agents.userIDs[def.Name], body, visible).Scan(&id)

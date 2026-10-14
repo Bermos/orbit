@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useAgents } from '../stores/agents'
 
-const props = defineProps<{ placeholder?: string; busy?: boolean; forcePrivate?: boolean }>()
+const props = defineProps<{ placeholder?: string; busy?: boolean; forcePrivate?: boolean; privateNote?: string }>()
 const emit = defineEmits<{ send: [body: string, isPrivate: boolean] }>()
 const agents = useAgents()
 const text = ref('')
@@ -38,7 +38,7 @@ function onKey(e: KeyboardEvent) {
   <div class="composer">
     <div class="input">
       <textarea v-model="text" :placeholder="hint" rows="2" @keydown="onKey" />
-      <div v-if="forcePrivate" class="options muted small">🔒 This thread is private: only you see it.</div>
+      <div v-if="forcePrivate" class="options muted small">🔒 {{ privateNote ?? 'This thread is private: only you see it.' }}</div>
       <label v-else-if="mentioned.length" class="options small" :title="`Only you will see this question and the answer. @${mentioned[0].name} may then use your personal data, such as your to-dos.`">
         <input v-model="onlyMe" type="checkbox" />
         Answer only me

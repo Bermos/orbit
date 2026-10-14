@@ -3,12 +3,19 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type App, type Channel } from '../api'
 import { startRealtime } from '../realtime'
+import { useAgents } from '../stores/agents'
+import { chatTitle, useChats } from '../stores/chats'
 import { useSession } from '../stores/session'
+import { useToasts } from '../stores/toast'
 import { useTodos } from '../stores/todos'
 
 const session = useSession()
 const todos = useTodos()
+const chats = useChats()
+const agents = useAgents()
+const toasts = useToasts()
 const router = useRouter()
+const picking = ref(false)
 const apps = ref<App[]>([])
 const channels = ref<Channel[]>([])
 
@@ -17,8 +24,23 @@ async function refresh() {
 }
 onMounted(async () => {
   startRealtime()
-  await Promise.all([refresh(), todos.load(session.user!.id)])
+  await Promise.all([refresh(), todos.load(session.user!.id), chats.load(session.user!.id), agents.load()])
 })
+
+// A new private chat: with the only agent straight away, otherwise pick one.
+async function newChat(agent?: string) {
+  if (!agent && agents.items.length !== 1) {
+    picking.value = !picking.value
+    return
+  }
+  picking.value = false
+  try {
+    const c = await chats.start(agent ?? agents.items[0].name)
+    router.push(`/channels/${c.id}`)
+  } catch (e) {
+    toasts.error(e)
+  }
+}
 window.addEventListener('orbit:nav-changed', refresh)
 
 async function logout() {
@@ -44,6 +66,23 @@ async function logout() {
         </RouterLink>
         <RouterLink to="/teams" class="item" active-class="active">Teams</RouterLink>
         <RouterLink to="/apps" class="item" exact-active-class="active">Applications</RouterLink>
+      </div>
+      <div v-if="agents.items.length" class="section">
+        <div class="heading row">
+          Chats with agents
+          <button class="add" title="New chat with an agent" aria-label="New chat with an agent" @click="newChat()">+</button>
+        </div>
+        <div v-if="picking" class="picker">
+          <button v-for="a in agents.items" :key="a.name" class="item pick" :title="a.description" @click="newChat(a.name)">
+            <span class="bot">@</span>{{ a.name }}
+            <span class="app-tag">{{ a.display_name }}</span>
+          </button>
+        </div>
+        <RouterLink v-for="c in chats.items.slice(0, 15)" :key="c.id" :to="`/channels/${c.id}`" class="item" active-class="active" :title="chatTitle(c)">
+          <span class="chat-title">{{ chatTitle(c) }}</span>
+          <span class="app-tag">@{{ c.agent }}</span>
+        </RouterLink>
+        <div v-if="!chats.items.length && !picking" class="item muted-item">Start a private chat with +</div>
       </div>
       <div class="section">
         <div class="heading">Applications</div>
@@ -102,6 +141,16 @@ async function logout() {
 .item:hover { background: var(--sidebar-active); text-decoration: none; }
 .item.active { background: var(--sidebar-active); color: white; }
 .muted-item { opacity: 0.5; }
+.heading.row { display: flex; align-items: center; }
+.add {
+  margin-left: auto; padding: 0 7px; line-height: 18px; border-radius: 6px; font-size: 15px;
+  background: transparent; color: var(--sidebar-text); border: none; opacity: 1;
+}
+.add:hover { background: var(--sidebar-active); }
+.picker { margin: 2px 0 6px; padding: 4px; border-radius: 8px; background: #ffffff0d; }
+.pick { width: 100%; background: transparent; border: none; text-align: left; font: inherit; cursor: pointer; }
+.bot { opacity: 0.5; }
+.chat-title { overflow: hidden; text-overflow: ellipsis; }
 .hash { opacity: 0.5; }
 .app-tag { margin-left: auto; font-size: 11px; opacity: 0.5; }
 .count { margin-left: auto; background: var(--accent); color: white; border-radius: 999px; padding: 0 7px; font-size: 11px; }

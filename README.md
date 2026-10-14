@@ -22,7 +22,7 @@ Orbit is a self-hosted platform where code, chat, issues, planning, reviews and 
 - Discussing a code range: the range is pinned to its commit and the lines are kept with the message
 - A link graph with backlinks on every message and issue
 - Full-text search over applications, issues and messages
-- Agents in chat: @mention an agent in a channel or issue discussion and it answers in the thread, using Orbit's own tools (see [Agents](#agents))
+- Agents in chat: start a private chat with an agent, or @mention one in a channel or issue discussion and it answers in the thread, using Orbit's own tools (see [Agents](#agents))
 - CI: pipelines from `.orbit/pipeline.yml` run on Kubernetes by pull-based runners, a checks API and webhooks for any other CI, personal access tokens, and agents that change code as CI jobs (see [CI](#ci))
 
 Not yet: code review and merge requests, epics and boards, notifications, OIDC and LDAP, and a Helm chart.
@@ -86,6 +86,8 @@ You help the ledger team. Cite issues as ledger#123 and files with line numbers.
 ```
 
 **Permissions.** An agent acts for the person who asked, with the minimum of that person's role and its own `role` and `apps`. Neither can use the other to reach more: a narrow agent stays narrow when an admin asks, and a broad agent cannot read more than the asker.
+
+**Private chats.** Anyone can start a private chat with an agent from the sidebar (*Chats with agents*, +), and keep as many as they like, one per topic. The agent answers every message in the chat itself, no mention needed, and sees the conversation so far. Everything in the chat is visible to that person alone, as with *answer only me*, so the agent may use everything they can read, still capped by its own role. A chat takes its title from its first message. API: `GET`/`POST /api/v1/direct-chats` (`{"agent": "assistant"}`), `DELETE /api/v1/direct-chats/{id}`; messages go through the usual `/channels/{id}/messages`.
 
 **Shared channels and "answer only me".** In a shared conversation an agent only uses what everyone in it can read, so personal data (to-dos, private messages) never reaches the answer. Ticking *Answer only me* in the composer makes the question and the answer visible to the asker alone, and the agent may then use everything the asker can read.
 

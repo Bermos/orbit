@@ -15,7 +15,9 @@ import MessageItem from './MessageItem.vue'
 // A channel's conversation with threads. Deep links (?message=, ?thread=)
 // open the right thread and highlight the exact message, which is how a
 // to-do or a link jumps straight back to its context.
-const props = defineProps<{ channelId: string; appKey?: string | null; emptyText?: string }>()
+// agent is set for a private chat with that agent: it answers every message
+// in the conversation itself, so nothing opens a thread.
+const props = defineProps<{ channelId: string; appKey?: string | null; emptyText?: string; agent?: string }>()
 
 const route = useRoute()
 const router = useRouter()
@@ -130,7 +132,7 @@ async function send(body: string, isPrivate: boolean, inThread: boolean) {
     const list = m.thread_id ? thread.value : messages.value
     if (!list?.some((x) => x.id === m.id)) onEvent('message.created', m)
     // Agents answer in the thread of the message that asked; open it.
-    if (!inThread && agents.mentioned(body).length) await openThread(m.id)
+    if (!inThread && !props.agent && agents.mentioned(body).length) await openThread(m.id)
   } catch (e) {
     toasts.error(e)
   } finally {
@@ -160,13 +162,20 @@ async function addTodo(m: Message) {
           v-for="m in messages"
           :key="m.id"
           :message="m"
+          :private-chat="!!agent"
           @reply="openThread(m.id)"
           @todo="addTodo(m)"
           @issue="issueSource = m"
           @links="linksFor = m"
         />
       </div>
-      <Composer :busy="sending" @send="(body, priv) => send(body, priv, false)" />
+      <Composer
+        :busy="sending"
+        :placeholder="agent ? `Message @${agent}` : undefined"
+        :force-private="!!agent"
+        :private-note="agent ? `Private chat: only you and @${agent} see it.` : undefined"
+        @send="(body, priv) => send(body, priv, false)"
+      />
     </div>
     <aside v-if="threadId" class="thread">
       <header>
@@ -181,6 +190,7 @@ async function addTodo(m: Message) {
             :key="m.id"
             :message="m"
             in-thread
+            :private-chat="!!agent"
             :class="{ root: i === 0 }"
             @todo="addTodo(m)"
             @issue="issueSource = m"
@@ -188,7 +198,13 @@ async function addTodo(m: Message) {
           />
         </template>
       </div>
-      <Composer placeholder="Reply in thread" :busy="sending" :force-private="threadPrivate" @send="(body, priv) => send(body, priv, true)" />
+      <Composer
+        placeholder="Reply in thread"
+        :busy="sending"
+        :force-private="threadPrivate"
+        :private-note="agent ? `Private chat: only you and @${agent} see it.` : undefined"
+        @send="(body, priv) => send(body, priv, true)"
+      />
     </aside>
     <CreateIssueDialog v-if="issueSource" :source="issueSource" :default-app="appKey" @close="issueSource = null" />
     <LinksDialog v-if="linksFor" :target="{ type: 'message', id: linksFor.id }" @close="linksFor = null" />

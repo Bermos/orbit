@@ -133,6 +133,9 @@ func (s *Server) resolve(ctx context.Context, ref Ref) (Entity, error) {
 			e.URL = fmt.Sprintf("/apps/%s/issues/%d?%s", *appKey, *issueNumber, q.Encode())
 		} else {
 			e.Subtitle = "#" + channelName
+			if kind == "direct" {
+				e.Subtitle = "private chat"
+			}
 			if appKey != nil {
 				e.Subtitle = *appKey + " #" + channelName
 			}
