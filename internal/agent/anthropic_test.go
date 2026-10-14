@@ -38,7 +38,7 @@ func TestAnthropicWireFormat(t *testing.T) {
 	p := NewAnthropic("test-key", option.WithBaseURL(api.URL), option.WithMaxRetries(0))
 	req := Request{Model: "claude-opus-5-5", System: "Be brief.", Effort: "low",
 		Turns: []Turn{{Role: "user", Blocks: []Block{{Type: "text", Text: "hi"}}}}}
-	res, err := Run(context.Background(), p, req, &echoTools{}, 3, nil)
+	res, err := Run(context.Background(), p, req, &echoTools{}, Limits{MaxSteps: 3}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

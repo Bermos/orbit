@@ -2,7 +2,9 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, type Commit, type RepoDetail, type TreeEntry } from '../api'
+import CommitList from '../components/CommitList.vue'
 import DiscussCodeDialog from '../components/DiscussCodeDialog.vue'
+import RepoHeader from '../components/RepoHeader.vue'
 import { useToasts } from '../stores/toast'
 import { useTodos } from '../stores/todos'
 
@@ -23,6 +25,7 @@ const selStart = ref<number | null>(null)
 const selEnd = ref<number | null>(null)
 const discussing = ref(false)
 
+const showCommits = computed(() => props.mode === 'tree' && route.query.tab === 'commits')
 const ref_ = computed(() => props.gitRef || detail.value?.repository.default_branch || 'main')
 const lines = computed(() => {
   if (content.value === null) return []
@@ -66,7 +69,7 @@ async function load() {
       content.value = null
       const [t, c] = await Promise.all([
         api.tree(props.app, props.repo, ref_.value, props.path),
-        props.path ? Promise.resolve(commits.value) : api.commits(props.app, props.repo, ref_.value),
+        props.path && !showCommits.value ? Promise.resolve(commits.value) : api.commits(props.app, props.repo, ref_.value),
       ])
       entries.value = t.entries.sort((x, y) => (x.type === y.type ? x.name.localeCompare(y.name) : x.type === 'tree' ? -1 : 1))
       commit.value = t.commit
@@ -76,7 +79,7 @@ async function load() {
     error.value = e instanceof Error ? e.message : String(e)
   }
 }
-watch(() => [props.app, props.repo, props.mode, props.gitRef, props.path], load, { immediate: true })
+watch(() => [props.app, props.repo, props.mode, props.gitRef, props.path, showCommits.value], load, { immediate: true })
 
 async function applyLinesQuery() {
   const m = /^(\d+)(?:-(\d+))?$/.exec((route.query.lines as string) ?? '')
@@ -133,23 +136,14 @@ async function copyLink() {
 }
 function switchBranch(e: Event) {
   const b = (e.target as HTMLSelectElement).value
-  router.push(props.mode === 'blob' ? `${base()}/blob/${b}/${props.path}` : `${base()}/tree/${b}/${props.path}`)
+  if (showCommits.value) router.push({ path: `${base()}/tree/${b}`, query: { tab: 'commits' } })
+  else router.push(props.mode === 'blob' ? `${base()}/blob/${b}/${props.path}` : `${base()}/tree/${b}/${props.path}`)
 }
 </script>
 
 <template>
   <div class="page wide">
-    <div class="page-header">
-      <div>
-        <div class="crumbs small muted"><RouterLink :to="`/apps/${app}`">{{ app }}</RouterLink> /</div>
-        <h1 class="mono">{{ repo }}</h1>
-      </div>
-      <span class="spacer" />
-      <div v-if="detail" class="clone row">
-        <span class="small muted">Clone</span>
-        <input class="mono small" :value="detail.clone_url" readonly aria-label="Clone URL" @focus="($event.target as HTMLInputElement).select()" />
-      </div>
-    </div>
+    <RepoHeader :app="app" :repo="repo" :detail="detail" :tab="showCommits ? 'commits' : 'code'" :git-ref="gitRef" />
 
     <div v-if="detail?.empty" class="card pad">
       <h3 style="margin-top: 0">This repository is empty</h3>
@@ -164,7 +158,7 @@ git push orbit {{ detail.repository.default_branch }}</pre>
           <option v-for="b in detail.branches" :key="b.name" :value="b.name">⎇ {{ b.name }}</option>
           <option v-if="!detail.branches.some((b) => b.name === ref_)" :value="ref_">{{ ref_.slice(0, 12) }}</option>
         </select>
-        <div class="path mono">
+        <div v-if="!showCommits" class="path mono">
           <RouterLink :to="treeLink('')">{{ repo }}</RouterLink>
           <template v-for="(c, i) in crumbs" :key="c.path">
             /
@@ -175,6 +169,11 @@ git push orbit {{ detail.repository.default_branch }}</pre>
       </div>
 
       <div v-if="error" class="card pad error">{{ error }}</div>
+
+      <div v-else-if="showCommits" class="card">
+        <CommitList v-if="commits.length" :app="app" :repo="repo" :repo-id="detail.repository.id" :commits="commits" />
+        <div v-else class="empty">No commits.</div>
+      </div>
 
       <div v-else-if="mode === 'tree'" class="grid2">
         <div class="card">
@@ -189,16 +188,12 @@ git push orbit {{ detail.repository.default_branch }}</pre>
           </ul>
         </div>
         <aside v-if="commits.length">
-          <h3 style="margin-top: 0">Recent commits</h3>
+          <div class="row">
+            <h3 class="grow" style="margin-top: 0">Recent commits</h3>
+            <RouterLink class="small" :to="{ path: `${base()}/tree/${ref_}`, query: { tab: 'commits' } }" style="margin-top: -8px">All commits</RouterLink>
+          </div>
           <div class="card">
-            <ul class="list">
-              <li v-for="c in commits.slice(0, 10)" :key="c.sha" class="commit">
-                <div>
-                  <div>{{ c.subject }}</div>
-                  <div class="small muted">{{ c.author }} · {{ new Date(c.date).toLocaleDateString() }} · <span class="mono">{{ c.sha.slice(0, 8) }}</span></div>
-                </div>
-              </li>
-            </ul>
+            <CommitList :app="app" :repo="repo" :repo-id="detail.repository.id" :commits="commits.slice(0, 10)" compact />
           </div>
         </aside>
       </div>
@@ -237,7 +232,6 @@ git push orbit {{ detail.repository.default_branch }}</pre>
 
 <style scoped>
 .wide { max-width: 1300px; }
-.clone input { width: 360px; }
 .cmd { background: var(--surface-2); padding: 12px; border-radius: 6px; }
 .bar { margin-bottom: 12px; }
 .branch { width: auto; }
@@ -255,5 +249,5 @@ tr.sel .ln { color: var(--accent); font-weight: 600; }
   position: fixed; bottom: 24px; left: 50%; transform: translateX(calc(-50% + 120px));
   display: flex; gap: 8px; align-items: center; padding: 8px 12px; box-shadow: 0 8px 30px #0003; z-index: 20;
 }
-.commit div { min-width: 0; }
+.grow { flex: 1; }
 </style>

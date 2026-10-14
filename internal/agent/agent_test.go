@@ -31,6 +31,7 @@ func TestParseDefinition(t *testing.T) {
 		"bad name":        "---\nname: Bot!\nmodel: fake\n---\n",
 		"no model":        "---\nname: bot\n---\n",
 		"bad role":        "---\nname: bot\nmodel: fake\nrole: god\n---\n",
+		"bad runs":        "---\nname: bot\nmodel: fake\nruns: cron\n---\n",
 	} {
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Errorf("%s: expected an error", name)
@@ -43,7 +44,7 @@ func TestCatalogOverridesBuiltins(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "assistant.md"), []byte("---\nname: assistant\nmodel: fake\n---\nLocal.\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "broken.md"), []byte("nope"), 0o644)
 	defs, problems := LoadCatalog(dir)
-	if len(defs) != 1 || defs[0].Model != "fake" || defs[0].Instructions != "Local." {
+	if len(defs) != 2 || defs[0].Model != "fake" || defs[0].Instructions != "Local." || defs[1].Name != "coder" {
 		t.Fatalf("defs = %+v", defs)
 	}
 	if len(problems) != 1 || !strings.Contains(problems[0].Error(), "broken.md") {
@@ -51,7 +52,8 @@ func TestCatalogOverridesBuiltins(t *testing.T) {
 	}
 
 	defs, problems = LoadCatalog("")
-	if len(problems) != 0 || len(defs) != 1 || defs[0].Name != "assistant" || !strings.HasPrefix(defs[0].Model, "anthropic/") {
+	if len(problems) != 0 || len(defs) != 2 || defs[0].Name != "assistant" || !strings.HasPrefix(defs[0].Model, "anthropic/") ||
+		defs[1].Name != "coder" || defs[1].Runs != "job" || defs[1].Role != "developer" {
 		t.Fatalf("builtin defs = %+v, %v", defs, problems)
 	}
 }
@@ -84,7 +86,7 @@ func TestRunLoopWithFake(t *testing.T) {
 	tools := &echoTools{}
 	req := Request{Turns: []Turn{{Role: "user", Blocks: []Block{{Type: "text", Text: "context"}, {Type: "text", Text: "@assistant double counting?"}}}}}
 	var steps []Step
-	res, err := Run(context.Background(), Fake{}, req, tools, 4, func(s Step) { steps = append(steps, s) })
+	res, err := Run(context.Background(), Fake{}, req, tools, Limits{MaxSteps: 4}, func(s Step) { steps = append(steps, s) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +99,7 @@ func TestRunLoopWithFake(t *testing.T) {
 
 	// A failed tool call is reported to the model, which can recover.
 	req.Turns[0].Blocks[1].Text = "@assistant create issue: Fix it"
-	res, err = Run(context.Background(), Fake{}, req, tools, 4, nil)
+	res, err = Run(context.Background(), Fake{}, req, tools, Limits{MaxSteps: 4}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +115,7 @@ func (refuser) Complete(ctx context.Context, req Request) (Response, error) {
 }
 
 func TestRunReportsRefusal(t *testing.T) {
-	_, err := Run(context.Background(), refuser{}, Request{Turns: []Turn{{Role: "user"}}}, &echoTools{}, 2, nil)
+	_, err := Run(context.Background(), refuser{}, Request{Turns: []Turn{{Role: "user"}}}, &echoTools{}, Limits{MaxSteps: 2}, nil)
 	if !errors.Is(err, ErrRefused) {
 		t.Fatalf("err = %v", err)
 	}

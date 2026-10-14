@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +17,7 @@ import (
 	"github.com/Bermos/orbit/internal/agent"
 	"github.com/Bermos/orbit/internal/db"
 	"github.com/Bermos/orbit/internal/gitrepo"
+	"github.com/Bermos/orbit/internal/runner"
 	"github.com/Bermos/orbit/internal/server"
 	"github.com/Bermos/orbit/web"
 )
@@ -69,6 +72,11 @@ func run() error {
 		return err
 	}
 
+	srv.StartCI(ctx)
+	if err := startEmbeddedRunner(ctx, srv, os.Getenv("ORBIT_EMBEDDED_RUNNER"), addr); err != nil {
+		return err
+	}
+
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Routes(),
@@ -117,4 +125,36 @@ func enableAgents(ctx context.Context, srv *server.Server, dir string) error {
 	}
 	slog.Info("agents loaded", "agents", names)
 	return srv.EnableAgents(ctx, defs, providers)
+}
+
+// startEmbeddedRunner runs a runner inside the server process, so a
+// development instance runs pipelines without any setup. Only the local
+// executor is supported: jobs run as processes next to Orbit, unisolated.
+func startEmbeddedRunner(ctx context.Context, srv *server.Server, executor, addr string) error {
+	switch executor {
+	case "":
+		return nil
+	case "local":
+	default:
+		return fmt.Errorf("ORBIT_EMBEDDED_RUNNER must be local, not %q", executor)
+	}
+	token, err := srv.RegisterEmbeddedRunner(ctx)
+	if err != nil {
+		return err
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("ORBIT_ADDR: %w", err)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	slog.Warn("embedded runner enabled: pipeline jobs run as processes on this machine without isolation; use it for development only")
+	go runner.Run(ctx, runner.Config{
+		URL:      "http://" + net.JoinHostPort(host, port),
+		Token:    token,
+		Executor: runner.Local{},
+		Version:  "embedded",
+	})
+	return nil
 }

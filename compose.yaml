@@ -26,6 +26,8 @@ services:
       ORBIT_BASE_URL: http://localhost:8080
       # Optional: agents answer with a built-in test model without it.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Runs pipelines inside the Orbit container, unisolated. Development only.
+      ORBIT_EMBEDDED_RUNNER: local
     ports:
       - "8080:8080"
     volumes:

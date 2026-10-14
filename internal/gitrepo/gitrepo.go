@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cgi"
 	"os"
@@ -47,9 +48,18 @@ func (s Store) Create(ctx context.Context, app, repo, defaultBranch string) erro
 }
 
 func (s Store) git(ctx context.Context, app, repo string, out *bytes.Buffer, args ...string) error {
+	return s.gitEnv(ctx, app, repo, nil, nil, out, args...)
+}
+
+// gitEnv runs git with extra environment variables and standard input.
+func (s Store) gitEnv(ctx context.Context, app, repo string, env []string, stdin io.Reader, out *bytes.Buffer, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir", s.Path(app, repo)}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	cmd.Stdin = stdin
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if out != nil {
 		cmd.Stdout = out
 	}
@@ -259,4 +269,58 @@ func (s Store) HTTPBackend(w http.ResponseWriter, r *http.Request, pathInfo, rem
 	// cgi.Handler derives PATH_INFO from the URL path minus Root.
 	h.Root = ""
 	h.ServeHTTP(w, r2)
+}
+
+// Person is a commit author or committer.
+type Person struct {
+	Name  string
+	Email string
+}
+
+// CommitPatch applies a binary git diff to base and commits the result
+// without touching any branch, returning the new commit. It works on the bare
+// repository through a temporary index, so no working tree is needed.
+func (s Store) CommitPatch(ctx context.Context, app, repo, base string, patch []byte, message string, author, committer Person) (string, error) {
+	idx, err := os.CreateTemp("", "orbit-index-*")
+	if err != nil {
+		return "", err
+	}
+	idx.Close()
+	os.Remove(idx.Name()) // git wants to create the index itself
+	defer os.Remove(idx.Name())
+	env := []string{
+		"GIT_INDEX_FILE=" + idx.Name(),
+		"GIT_AUTHOR_NAME=" + author.Name, "GIT_AUTHOR_EMAIL=" + author.Email,
+		"GIT_COMMITTER_NAME=" + committer.Name, "GIT_COMMITTER_EMAIL=" + committer.Email,
+	}
+	if err := s.gitEnv(ctx, app, repo, env, nil, nil, "read-tree", base); err != nil {
+		return "", err
+	}
+	if err := s.gitEnv(ctx, app, repo, env, bytes.NewReader(patch), nil, "apply", "--cached", "--binary", "-"); err != nil {
+		return "", fmt.Errorf("the changes no longer apply: %w", err)
+	}
+	var tree bytes.Buffer
+	if err := s.gitEnv(ctx, app, repo, env, nil, &tree, "write-tree"); err != nil {
+		return "", err
+	}
+	var commit bytes.Buffer
+	if err := s.gitEnv(ctx, app, repo, env, strings.NewReader(message), &commit, "commit-tree", strings.TrimSpace(tree.String()), "-p", base); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(commit.String()), nil
+}
+
+// ErrBranchExists is returned by CreateBranch when the branch exists.
+var ErrBranchExists = errors.New("branch already exists")
+
+// CreateBranch points a new branch at a commit. It never moves an existing
+// branch.
+func (s Store) CreateBranch(ctx context.Context, app, repo, branch, commit string) error {
+	if err := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branch).Run(); err != nil || strings.HasPrefix(branch, "-") {
+		return fmt.Errorf("invalid branch name %q", branch)
+	}
+	if _, err := s.ResolveCommit(ctx, app, repo, "refs/heads/"+branch); err == nil {
+		return ErrBranchExists
+	}
+	return s.git(ctx, app, repo, nil, "update-ref", "refs/heads/"+branch, commit, strings.Repeat("0", 40))
 }

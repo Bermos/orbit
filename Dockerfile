@@ -12,14 +12,15 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/orbit ./cmd/orbit
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/orbit ./cmd/orbit && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/orbit-runner ./cmd/orbit-runner
 
 # git is needed at runtime for hosting and browsing repositories.
 FROM alpine:3.21
 RUN apk add --no-cache git git-daemon ca-certificates && adduser -D -u 10001 orbit
 USER orbit
 WORKDIR /home/orbit
-COPY --from=build /out/orbit /usr/local/bin/orbit
+COPY --from=build /out/orbit /out/orbit-runner /usr/local/bin/
 ENV ORBIT_DATA_DIR=/data
 VOLUME /data
 EXPOSE 8080

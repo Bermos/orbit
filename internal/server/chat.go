@@ -403,7 +403,11 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 	}
 	s.publishMessage(ctx, m)
 	for _, def := range mentioned {
-		if err := s.startRun(ctx, def, u, ch, m); err != nil {
+		start := s.startRun
+		if def.Runs == "job" {
+			start = s.startAgentJob
+		}
+		if err := start(ctx, def, u, ch, m); err != nil {
 			slog.Error("start agent run", "agent", def.Name, "err", err)
 		}
 	}
@@ -467,6 +471,20 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 		switch kind {
 		case "user":
 			return id == u.ID
+		case "repo":
+			var app string
+			if err := s.DB.QueryRow(ctx, `select app_key from repositories where id = $1`, id).Scan(&app); err != nil {
+				return false
+			}
+			role, err := s.Access.AppRole(ctx, u.ID, app)
+			return err == nil && role >= access.Reader
+		case "job":
+			var app string
+			if err := s.DB.QueryRow(ctx, `select r.app_key from jobs j join pipelines p on p.id = j.pipeline_id join repositories r on r.id = p.repo_id where j.id = $1`, id).Scan(&app); err != nil {
+				return false
+			}
+			role, err := s.Access.AppRole(ctx, u.ID, app)
+			return err == nil && role >= access.Reader
 		case "channel":
 			var app *string
 			if err := s.DB.QueryRow(ctx, `select app_key from channels where id = $1`, id).Scan(&app); err != nil {

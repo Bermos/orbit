@@ -20,12 +20,21 @@ const labels: Record<string, string> = {
   propose_issue: 'Drafted an issue',
   propose_todo: 'Drafted a to-do',
   propose_issue_comment: 'Drafted a comment',
+  write_file: 'Wrote file',
+  edit_file: 'Edited file',
+  run: 'Ran',
 }
 
 function describe(s: AgentStep) {
   const i = s.input ?? {}
   const detail =
-    i.query ?? (i.number ? `${i.app}#${i.number}` : null) ?? (i.path ? `${i.app}/${i.repo}:${i.path}` : null) ?? i.app ?? i.title ?? ''
+    i.query ??
+    i.command ??
+    (i.number ? `${i.app}#${i.number}` : null) ??
+    (i.path !== undefined ? (i.app ? `${i.app}/${i.repo}:${i.path}` : i.path || '.') : null) ??
+    i.app ??
+    i.title ??
+    ''
   return `${labels[s.tool] ?? s.tool}${detail ? ' · ' + detail : ''}`
 }
 </script>

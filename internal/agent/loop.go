@@ -35,12 +35,25 @@ type Result struct {
 // ErrRefused is returned when the model declined to answer.
 var ErrRefused = errors.New("the model declined to answer this request")
 
+// ErrBudget is returned when a run used up its token budget.
+var ErrBudget = errors.New("the run used up its token budget")
+
+// Limits bound a run.
+type Limits struct {
+	// MaxSteps caps model calls.
+	MaxSteps int
+	// TokenBudget caps input plus output tokens over the whole run; 0 means
+	// no budget. The call that crosses it still completes.
+	TokenBudget int64
+}
+
 // Run drives the tool-use loop: call the model, run the tools it asks for,
-// feed the results back, until it answers or maxSteps model calls are spent.
-// The last call asks for an answer without further tools. onStep is called
-// after every tool call.
-func Run(ctx context.Context, p Provider, req Request, tools Toolbox, maxSteps int, onStep func(Step)) (Result, error) {
+// feed the results back, until it answers or the limits are reached. The
+// last call asks for an answer without further tools. onStep is called after
+// every tool call.
+func Run(ctx context.Context, p Provider, req Request, tools Toolbox, limits Limits, onStep func(Step)) (Result, error) {
 	var res Result
+	maxSteps := limits.MaxSteps
 	req.Tools = tools.Specs()
 	for i := 0; i < maxSteps; i++ {
 		req.NoMoreTools = i == maxSteps-1
@@ -50,6 +63,9 @@ func Run(ctx context.Context, p Provider, req Request, tools Toolbox, maxSteps i
 		}
 		res.Usage.InputTokens += resp.Usage.InputTokens
 		res.Usage.OutputTokens += resp.Usage.OutputTokens
+		if limits.TokenBudget > 0 && res.Usage.InputTokens+res.Usage.OutputTokens > limits.TokenBudget && resp.StopReason == "tool_use" {
+			return res, ErrBudget
+		}
 		if resp.StopReason == "refusal" {
 			return res, ErrRefused
 		}

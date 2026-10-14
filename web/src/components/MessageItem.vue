@@ -4,6 +4,7 @@ import AgentRunView from './AgentRunView.vue'
 import CodeSnippet from './CodeSnippet.vue'
 import EntityChip from './EntityChip.vue'
 import ProposalCard from './ProposalCard.vue'
+import StatusDot from './StatusDot.vue'
 
 defineProps<{ message: Message; inThread?: boolean }>()
 const emit = defineEmits<{ reply: []; todo: []; issue: []; links: [] }>()
@@ -33,6 +34,15 @@ function time(s: string) {
           <blockquote v-if="a.quote">{{ a.quote }}</blockquote>
         </div>
         <ProposalCard v-else-if="a.type === 'proposal'" :proposal="a.proposal" />
+        <div v-else-if="a.type === 'job'" class="job small">
+          <StatusDot :status="a.job.status" />
+          <RouterLink :to="{ path: a.job.pipeline.url, query: { job: a.job.name } }">
+            Job {{ a.job.name }} · {{ a.job.pipeline.app }}/{{ a.job.pipeline.repo }} pipeline #{{ a.job.pipeline.number }}
+          </RouterLink>
+          <span class="muted">· {{ a.job.status }}</span>
+          <RouterLink v-if="a.job.has_patch" :to="{ path: a.job.pipeline.url, query: { job: a.job.name } }">View changes</RouterLink>
+          <span v-if="a.job.error" class="error">{{ a.job.error }}</span>
+        </div>
       </template>
       <template v-for="(a, i) in message.attachments" :key="'run' + i">
         <AgentRunView v-if="a.type === 'agent_run'" :run="a.run" />
@@ -69,6 +79,7 @@ function time(s: string) {
 .meta { display: flex; gap: 8px; align-items: baseline; }
 .body { white-space: pre-wrap; word-wrap: break-word; }
 .entity { margin-top: 4px; }
+.job { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); width: fit-content; max-width: 100%; }
 blockquote { margin: 6px 0 0; padding: 4px 10px; border-left: 3px solid var(--accent); color: var(--muted); white-space: pre-wrap; }
 .footer { display: flex; gap: 4px; margin-left: -8px; }
 .footer button { color: var(--accent); }

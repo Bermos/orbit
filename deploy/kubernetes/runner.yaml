@@ -1,0 +1,101 @@
+# An Orbit runner that runs CI jobs as pods in the orbit-ci namespace.
+#
+#   kubectl create namespace orbit-ci
+#   kubectl -n orbit-ci create secret generic orbit-runner \
+#     --from-literal=url=https://orbit.example.com --from-literal=token=orbit_rnr_...
+#   kubectl apply -f runner.yaml
+#
+# Register the runner in Orbit first (Settings for a shared runner, or an
+# application's CI tab) to get its token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orbit-runner
+  namespace: orbit-ci
+---
+# The runner creates, watches, execs into and deletes job pods in its own
+# namespace, and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orbit-runner
+  namespace: orbit-ci
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create, get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orbit-runner
+  namespace: orbit-ci
+subjects:
+  - kind: ServiceAccount
+    name: orbit-runner
+    namespace: orbit-ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orbit-runner
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orbit-runner
+  namespace: orbit-ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: orbit-runner }
+  template:
+    metadata:
+      labels: { app: orbit-runner }
+    spec:
+      serviceAccountName: orbit-runner
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: runner
+          image: orbit:latest # the Orbit image; it contains orbit-runner
+          command: [orbit-runner]
+          env:
+            - name: ORBIT_URL
+              valueFrom: { secretKeyRef: { name: orbit-runner, key: url } }
+            - name: ORBIT_RUNNER_TOKEN
+              valueFrom: { secretKeyRef: { name: orbit-runner, key: token } }
+            - name: ORBIT_RUNNER_CONCURRENCY
+              value: "4"
+            # - name: ORBIT_RUNNER_RUNTIME_CLASS
+            #   value: gvisor
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+---
+# Example: agent jobs may only reach Orbit (to clone) and DNS. Needs a CNI
+# that enforces NetworkPolicy; adjust the Orbit selector to your install.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orbit-agent-jobs
+  namespace: orbit-ci
+spec:
+  podSelector:
+    matchLabels: { orbit.dev/kind: agent }
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: orbit } }
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

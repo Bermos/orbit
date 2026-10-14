@@ -23,8 +23,9 @@ Orbit is a self-hosted platform where code, chat, issues, planning, reviews and 
 - A link graph with backlinks on every message and issue
 - Full-text search over applications, issues and messages
 - Agents in chat: @mention an agent in a channel or issue discussion and it answers in the thread, using Orbit's own tools (see [Agents](#agents))
+- CI: pipelines from `.orbit/pipeline.yml` run on Kubernetes by pull-based runners, a checks API and webhooks for any other CI, personal access tokens, and agents that change code as CI jobs (see [CI](#ci))
 
-Not yet: code review, CI, agents that change code, epics and boards, notifications, OIDC and LDAP, and a Helm chart.
+Not yet: code review and merge requests, epics and boards, notifications, OIDC and LDAP, and a Helm chart.
 
 ## Run it
 
@@ -59,6 +60,7 @@ To serve the UI from the Go binary, run `npm run build` in `web/` before `go bui
 | `ORBIT_BASE_URL` | `http://localhost:8080` | External URL, used for clone URLs and secure cookies |
 | `ORBIT_AGENTS_DIR` | | Directory of agent definition files (`*.md`) added to the built-in agents |
 | `ANTHROPIC_API_KEY` | | Key for agents whose model is `anthropic/...`. Without it they answer with a built-in test model |
+| `ORBIT_EMBEDDED_RUNNER` | | `local` runs a CI runner inside the server, executing jobs as unisolated processes. For development only |
 
 Migrations run automatically on startup.
 
@@ -93,7 +95,91 @@ You help the ledger team. Cite issues as ledger#123 and files with line numbers.
 
 **Models.** Providers are pluggable (`internal/agent`). Orbit includes an Anthropic provider and a deterministic `fake` provider that tests and local runs use, so the whole flow works without credentials.
 
-Changing code is not possible from chat; that comes with CI, as agent jobs.
+Agents with `runs: job` change code: see [Agent jobs](#agent-jobs).
+
+## CI
+
+Orbit owns the CI control plane (pipelines, scheduling, logs, the UI) and hands execution to runners. Every CI result, Orbit's own or an external system's, is a *check* on a commit, so commits show one status whatever produced it.
+
+### Pipelines
+
+A repository defines its pipeline in `.orbit/pipeline.yml`. Every push to a branch it applies to starts one; it can also be started by hand from the repository's Pipelines tab.
+
+```yaml
+when:
+  branches: [main, "release/*"]   # optional; default: every branch
+jobs:
+  test:
+    image: golang:1.26
+    script:
+      - go vet ./...
+      - go test ./...
+    env:
+      GOFLAGS: -mod=mod
+  build:
+    image: golang:1.26
+    needs: [test]                 # waits for test to succeed
+    script: [go build ./...]
+    timeout: 20m                  # default 30m
+  review:
+    agent: reviewer               # an agent job, see below
+    prompt: Check this change for missing tests.
+```
+
+Jobs without `needs` run in parallel; a job whose needs did not succeed is skipped. Each job reports as the check `orbit/<job>` on the commit. Jobs see `CI`, `ORBIT_APP`, `ORBIT_REPO`, `ORBIT_COMMIT`, `ORBIT_REF`, `ORBIT_PIPELINE_NUMBER` and `ORBIT_JOB`. A broken pipeline file shows up as a failed pipeline with the reason.
+
+### Runners
+
+Runners pull jobs from Orbit over HTTPS, so they need no inbound access and can run in any cluster that reaches Orbit. An instance admin registers shared runners (Settings), a maintainer registers runners for their application (the application's CI tab); either way the runner's token is shown once.
+
+`orbit-runner` runs each job as a pod: an init container clones the commit with a short-lived job token (valid for that one repository while the job runs), then the job's script runs in the job's image. Pods get no service account token, no privilege escalation and no capabilities. [`deploy/kubernetes/runner.yaml`](deploy/kubernetes/runner.yaml) has the namespace, RBAC and Deployment.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ORBIT_URL` | | Orbit's URL as the runner and its pods reach it |
+| `ORBIT_RUNNER_TOKEN` | | The runner's token |
+| `ORBIT_RUNNER_EXECUTOR` | `kubernetes` | `kubernetes`, or `local` to run jobs as processes on the runner's machine (development) |
+| `ORBIT_RUNNER_CONCURRENCY` | `2` | Jobs run at once |
+| `ORBIT_RUNNER_NAMESPACE` | the runner's own | Namespace for job pods |
+| `ORBIT_RUNNER_RUNTIME_CLASS` | | `runtimeClassName` for job pods, for example `gvisor` |
+| `ORBIT_RUNNER_CPU_LIMIT`, `ORBIT_RUNNER_MEMORY_LIMIT` | | Limits for the job container |
+| `ORBIT_RUNNER_AGENT_IMAGE` | `golang:1.26` | Image for agent jobs whose agent names none (it needs `sh`) |
+| `ORBIT_RUNNER_GIT_IMAGE` | `alpine/git:2.54.0` | Image that clones repositories |
+
+For a quick local try, start the server with `ORBIT_EMBEDDED_RUNNER=local`.
+
+### External CI: checks API, webhooks and tokens
+
+Keep an existing CI while you migrate. Create a personal access token (Settings), then report results on a commit:
+
+```sh
+curl -X POST "$ORBIT/api/v1/apps/ledger/repos/api/commits/$SHA/checks" \
+  -H "Authorization: Bearer $ORBIT_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "jenkins/build", "status": "success", "summary": "412 tests passed", "details_url": "https://ci.example.com/42"}'
+```
+
+`status` is one of `pending`, `running`, `success`, `failure`, `error`, `cancelled`, `skipped`; reporting the same `name` again updates the check. Reporting needs the developer role; `orbit/` names are reserved. Personal access tokens also work as the password for `git` over HTTPS.
+
+Webhooks (an application's CI tab, maintainers) send `push`, `check` and `pipeline` events, optionally for one repository only, to trigger and follow external systems. Each request carries `X-Orbit-Event` and `X-Orbit-Signature: sha256=<HMAC-SHA256 of the body with the hook's secret>`. Deliveries are attempted once and listed under the hook.
+
+### Agent jobs
+
+An agent job is an agent working on a fresh checkout of a repository, on the same engine as other jobs. Agents whose definition says `runs: job` start one when they are @mentioned; Orbit ships one, [`coder`](internal/agent/catalog/coder.md). Pipeline files can run them too (`agent:` and `prompt:` instead of `script:`), acting for whoever triggered the pipeline.
+
+```
+@coder fix the rounding in ledger/api@release/2.3, see ledger#41
+```
+
+The repository is the one named as `app/repo` (optionally `@branch`), otherwise the code the conversation discusses, otherwise the conversation's application's only repository. Starting a job needs the developer role.
+
+- **The model stays on the server.** Orbit runs the agent loop with the same rule as chat: the agent acts for the person with the minimum of their role and its own. Tools that touch the checkout (`list_files`, `read_file`, `write_file`, `edit_file`, `run`) are sent to the runner and run in the job's pod; Orbit's read tools (`search`, `get_issue`, ...) run on the server. Model credentials never reach the runner.
+- **Progress shows where it was asked.** The reply in the thread follows the job, and every tool call lands in the job's log.
+- **Nothing is pushed without a person.** The runner hands back the changes as a diff. The reply offers to push them as a branch (`agent/<agent>-<pipeline>`); only the person who asked can confirm, which needs the developer role for both them and the agent. The commit is authored by the agent and committed by that person, and the new branch runs its pipeline like any push.
+- **Bounded.** Jobs time out (30 minutes by default), and `max_steps` and `budget_tokens` in the agent's definition cap model calls and tokens.
+
+Agent pods carry the label `orbit.dev/kind=agent`, so a NetworkPolicy can restrict their egress; the runner manifest includes an example.
+
+Not yet: pausing a job to ask a person a question, merge requests for agent branches, artifacts and caches, secrets for jobs, retrying failed webhook deliveries, and an importer for `.gitlab-ci.yml`.
 
 ### Tests
 
@@ -107,12 +193,16 @@ The tests drop and recreate the schema of that database, so point it at a dispos
 
 ```
 cmd/orbit           server entrypoint
+cmd/orbit-runner    CI runner
 internal/db         connection pool and embedded SQL migrations
 internal/access     role resolution through the ownership mapping
 internal/agent      agent definitions, model providers and the tool-use loop
 internal/gitrepo    bare repositories on disk, smart HTTP, browsing
+internal/pipeline   pipeline files and the runner protocol
+internal/runner     the runner and its executors (Kubernetes, local)
 internal/realtime   WebSocket event hub
-internal/server     REST API handlers, the link graph, and agents' tools and runs
+internal/server     REST API handlers, the link graph, agents' tools and runs, and the CI control plane
+deploy/kubernetes   manifests for the runner
 web/                Vue 3 + TypeScript UI (embedded into the binary)
 ```
 

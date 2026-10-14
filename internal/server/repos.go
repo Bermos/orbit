@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/Bermos/orbit/internal/access"
 	"github.com/Bermos/orbit/internal/gitrepo"
+	"github.com/Bermos/orbit/internal/pipeline"
 )
 
 type Repo struct {
@@ -190,13 +193,18 @@ func (s *Server) repoCommits(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return gitErr(err)
 	}
-	writeJSON(w, http.StatusOK, commits)
+	out, err := s.commitsWithState(r.Context(), repo, commits)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, out)
 	return nil
 }
 
 // serveGit handles clone, fetch and push over HTTPS at
-// /git/<app>/<repo>.git/... with basic auth (username and password, or
-// username and a session token).
+// /git/<app>/<repo>.git/... with basic auth: a username and password, a
+// session or personal access token as the password, or (for runners) user
+// orbit-job with a job token, which can only fetch the job's repository.
 func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/git/")
 	parts := strings.SplitN(rest, "/", 3)
@@ -205,6 +213,7 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app, name := parts[0], strings.TrimSuffix(parts[1], ".git")
+	push := r.URL.Query().Get("service") == "git-receive-pack" || strings.HasSuffix(r.URL.Path, "/git-receive-pack")
 
 	username, password, ok := r.BasicAuth()
 	if !ok {
@@ -212,9 +221,20 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
-	u, err := s.userByPassword(r.Context(), username, password)
+	ctx := r.Context()
+	if username == pipeline.JobUser {
+		j, err := s.jobByToken(ctx, password)
+		if err != nil || j.App != app || j.Repo != name || push {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Orbit"`)
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			return
+		}
+		s.Git.HTTPBackend(w, r, "/"+app+"/"+name+".git/"+parts[2], pipeline.JobUser)
+		return
+	}
+	u, err := s.userByPassword(ctx, username, password)
 	if err != nil {
-		if su, serr := s.userBySession(r.Context(), password); serr == nil && su.Username == strings.ToLower(username) {
+		if su, serr := s.userByToken(ctx, password); serr == nil && su.Username == strings.ToLower(username) {
 			u, err = su, nil
 		}
 	}
@@ -224,21 +244,43 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var exists bool
-	if err := s.DB.QueryRow(r.Context(), `select exists (select 1 from repositories where app_key = $1 and name = $2)`, app, name).Scan(&exists); err != nil || !exists {
+	rows, err := s.DB.Query(ctx, `select `+repoCols+` from repositories r where r.app_key = $1 and r.name = $2`, app, name)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	repos, err := scanRepos(rows)
+	if err != nil || len(repos) == 0 {
 		http.NotFound(w, r)
 		return
 	}
 
-	push := r.URL.Query().Get("service") == "git-receive-pack" || strings.HasSuffix(r.URL.Path, "/git-receive-pack")
 	need := access.Reader
 	if push {
 		need = access.Developer
 	}
-	role, err := s.Access.AppRole(r.Context(), u.ID, app)
+	role, err := s.Access.AppRole(ctx, u.ID, app)
 	if err != nil || role < need {
 		http.Error(w, "permission denied", http.StatusForbidden)
 		return
 	}
+	if !push || r.Method != http.MethodPost {
+		s.Git.HTTPBackend(w, r, "/"+app+"/"+name+".git/"+parts[2], u.Username)
+		return
+	}
+	// A push: compare branch heads around it to see what changed.
+	before, err := s.Git.Branches(ctx, app, name)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	s.Git.HTTPBackend(w, r, "/"+app+"/"+name+".git/"+parts[2], u.Username)
+	after, err := s.Git.Branches(context.WithoutCancel(ctx), app, name)
+	if err != nil {
+		slog.Error("list branches after push", "err", err)
+		return
+	}
+	for _, ch := range pushedRefs(before, after) {
+		s.onPush(context.WithoutCancel(ctx), repos[0], u, ch[0], ch[1], ch[2])
+	}
 }

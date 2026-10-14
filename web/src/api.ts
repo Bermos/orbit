@@ -89,6 +89,16 @@ export type Attachment =
   | { type: 'entity'; entity: Entity; quote?: string }
   | { type: 'agent_run'; run: AgentRun }
   | { type: 'proposal'; proposal: Proposal }
+  | { type: 'job'; job: JobRef }
+
+export interface JobRef {
+  id: string
+  name: string
+  status: JobStatus
+  has_patch: boolean
+  error: string
+  pipeline: { id: string; number: number; app: string; repo: string; ref: string; commit: string; status: string; url: string }
+}
 
 export interface Agent {
   user_id: string
@@ -111,7 +121,8 @@ export interface AgentRun {
   id: string
   agent: string
   asker_id: string | null
-  channel_id: string
+  channel_id: string | null
+  job_id: string | null
   trigger_message_id: string | null
   reply_message_id: string | null
   private: boolean
@@ -127,10 +138,10 @@ export interface AgentRun {
 export interface Proposal {
   id: string
   run_id: string
-  kind: 'issue' | 'todo' | 'issue_comment'
+  kind: 'issue' | 'todo' | 'issue_comment' | 'branch'
   status: 'pending' | 'applying' | 'applied' | 'dismissed'
   summary: string
-  input: { app?: string; number?: number; title?: string; body?: string }
+  input: { app?: string; number?: number; title?: string; body?: string; repo?: string; branch?: string; base?: string; job_id?: string }
   asker_id: string | null
   result: Entity | null
   created_at: string
@@ -200,6 +211,104 @@ export interface Commit {
   email: string
   date: string
   subject: string
+  checks_state: '' | 'success' | 'failure' | 'pending' | 'cancelled'
+}
+export type CheckStatus = 'pending' | 'running' | 'success' | 'failure' | 'error' | 'cancelled' | 'skipped'
+export interface Check {
+  id: string
+  commit: string
+  name: string
+  status: CheckStatus
+  summary: string
+  details_url: string
+  job_id: string | null
+  author: Author | null
+  created_at: string
+  updated_at: string
+}
+export interface PipelineJobSpec {
+  name: string
+  image?: string
+  script?: string[]
+  env?: Record<string, string>
+  needs?: string[]
+  timeout: number
+  agent?: string
+  prompt?: string
+}
+export type JobStatus = 'pending' | 'running' | 'success' | 'failure' | 'error' | 'cancelled' | 'skipped'
+export interface Job {
+  id: string
+  pipeline_id: string
+  name: string
+  kind: 'script' | 'agent'
+  spec: PipelineJobSpec
+  needs: string[]
+  status: JobStatus
+  exit_code: number | null
+  error: string
+  runner: string | null
+  has_patch: boolean
+  agent_run_id: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+export interface Pipeline {
+  id: string
+  app: string
+  repo: string
+  number: number
+  commit: string
+  ref: string
+  trigger: 'push' | 'manual' | 'agent'
+  triggered_by: Author | null
+  status: 'pending' | 'running' | 'success' | 'failure' | 'error' | 'cancelled'
+  error: string
+  created_at: string
+  finished_at: string | null
+  jobs: Job[]
+}
+export interface LogChunk {
+  seq: number
+  data: string
+}
+export interface Runner {
+  id: string
+  name: string
+  app_key: string | null
+  executor: string
+  version: string
+  last_seen_at: string | null
+  created_at: string
+}
+export type WebhookEvent = 'push' | 'check' | 'pipeline'
+export interface Webhook {
+  id: string
+  app_key: string
+  repo: string | null
+  url: string
+  events: WebhookEvent[]
+  active: boolean
+  created_at: string
+  last_status: number | null
+  last_error: string | null
+  last_delivery_at: string | null
+}
+export interface WebhookDelivery {
+  id: string
+  event: string
+  status_code: number
+  error: string
+  duration_ms: number
+  created_at: string
+}
+export interface ApiToken {
+  id: string
+  name: string
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
 }
 export interface CodeInput {
   app: string
@@ -284,6 +393,37 @@ export const api = {
       `/apps/${app}/repos/${repo}/blob${q({ ref, path })}`,
     ),
   commits: (app: string, repo: string, ref: string) => request<Commit[]>('GET', `/apps/${app}/repos/${repo}/commits${q({ ref })}`),
+
+  checks: (app: string, repo: string, sha: string) =>
+    request<{ commit: string; state: string; checks: Check[] }>('GET', `/apps/${app}/repos/${repo}/commits/${sha}/checks`),
+  pipelines: (app: string, repo: string) => request<Pipeline[]>('GET', `/apps/${app}/repos/${repo}/pipelines`),
+  runPipeline: (app: string, repo: string, ref: string) => request<Pipeline>('POST', `/apps/${app}/repos/${repo}/pipelines`, { ref }),
+  pipeline: (app: string, repo: string, n: number) => request<Pipeline>('GET', `/apps/${app}/repos/${repo}/pipelines/${n}`),
+  cancelPipeline: (app: string, repo: string, n: number) =>
+    request<Pipeline>('POST', `/apps/${app}/repos/${repo}/pipelines/${n}/cancel`),
+  jobLogs: (id: string, after = 0) =>
+    request<{ job: Job; chunks: LogChunk[] }>('GET', `/jobs/${id}/logs${q({ after: after ? String(after) : undefined })}`),
+  jobPatch: async (id: string) => {
+    const res = await fetch(`/api/v1/jobs/${id}/patch`, { credentials: 'same-origin' })
+    if (!res.ok) throw new ApiError(res.status, (await res.json().catch(() => ({}))).error ?? res.statusText)
+    return res.text()
+  },
+
+  webhooks: (app: string) => request<Webhook[]>('GET', `/apps/${app}/webhooks`),
+  createWebhook: (app: string, input: { url: string; repo?: string | null; events?: WebhookEvent[]; secret?: string }) =>
+    request<{ webhook: Webhook; secret: string }>('POST', `/apps/${app}/webhooks`, input),
+  deleteWebhook: (app: string, id: string) => request<void>('DELETE', `/apps/${app}/webhooks/${id}`),
+  webhookDeliveries: (app: string, id: string) => request<WebhookDelivery[]>('GET', `/apps/${app}/webhooks/${id}/deliveries`),
+
+  runners: (app?: string) => request<Runner[]>('GET', `/runners${q({ app })}`),
+  createRunner: (name: string, app_key: string | null) =>
+    request<{ runner: Runner; token: string }>('POST', '/runners', { name, app_key }),
+  deleteRunner: (id: string) => request<void>('DELETE', `/runners/${id}`),
+
+  tokens: () => request<ApiToken[]>('GET', '/me/tokens'),
+  createToken: (name: string, expires_in_days?: number) =>
+    request<{ token: ApiToken; secret: string }>('POST', '/me/tokens', { name, expires_in_days }),
+  deleteToken: (id: string) => request<void>('DELETE', `/me/tokens/${id}`),
 
   issues: (app: string, status = 'active') => request<Issue[]>('GET', `/apps/${app}/issues${q({ status })}`),
   issue: (app: string, n: number) => request<{ issue: Issue; links: LinkView[] }>('GET', `/apps/${app}/issues/${n}`),
