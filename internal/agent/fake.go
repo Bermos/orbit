@@ -20,6 +20,7 @@ var (
 	fakeTodo    = regexp.MustCompile(`(?i)\b(?:remind me to|add (?:a )?to-?do)\b[:\s-]*(.*)`)
 	fakeMyTodos = regexp.MustCompile(`(?i)\bmy\s+to-?dos\b`)
 	fakeMention = regexp.MustCompile(`@[a-z0-9][a-z0-9._-]*`)
+	fakeWrite   = regexp.MustCompile(`(?i)\b(?:add|create|write)\s+(?:a\s+)?file\s+(\S+?)(?:\s+(?:saying|with|containing)\s+(.*))?$`)
 )
 
 func (Fake) Complete(ctx context.Context, req Request) (Response, error) {
@@ -63,10 +64,15 @@ func (Fake) Complete(ctx context.Context, req Request) (Response, error) {
 		return call("propose_todo", map[string]string{"title": strings.TrimSpace(fakeTodo.FindStringSubmatch(question)[1])}), nil
 	case fakeMyTodos.MatchString(question) && has("list_my_todos"):
 		return call("list_my_todos", map[string]any{}), nil
+	case fakeWrite.MatchString(question) && has("write_file"):
+		m := fakeWrite.FindStringSubmatch(question)
+		return call("write_file", map[string]string{"path": m[1], "content": strings.TrimSpace(m[2]) + "\n"}), nil
+	case has("run"):
+		return call("run", map[string]string{"command": "ls"}), nil
 	case question != "" && has("search"):
 		return call("search", map[string]string{"query": question}), nil
 	}
-	return text("I'm Orbit's test model, so I can only search, list your to-dos and draft issues or to-dos."), nil
+	return text("I'm Orbit's test model, so I can only search, list your to-dos, draft issues or to-dos, and in jobs write a file or list the checkout."), nil
 }
 
 // summarise turns a tool result into a short answer.

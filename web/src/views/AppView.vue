@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, roleRank, type AppDetail, type Issue, type Team } from '../api'
+import CiSettings from '../components/CiSettings.vue'
 import Modal from '../components/Modal.vue'
 import { useToasts } from '../stores/toast'
 
@@ -99,6 +100,7 @@ async function removeMapping(team: string) {
     <nav class="tabs">
       <RouterLink :to="{ query: {} }" :class="{ active: tab === 'overview' }">Overview</RouterLink>
       <RouterLink :to="{ query: { tab: 'issues' } }" :class="{ active: tab === 'issues' }">Issues</RouterLink>
+      <RouterLink v-if="canMaintain" :to="{ query: { tab: 'ci' } }" :class="{ active: tab === 'ci' }">CI</RouterLink>
     </nav>
 
     <div v-if="tab === 'overview'" class="grid2">
@@ -160,6 +162,8 @@ async function removeMapping(team: string) {
         </div>
       </aside>
     </div>
+
+    <CiSettings v-else-if="tab === 'ci'" :detail="detail" />
 
     <div v-else>
       <div class="row filter">

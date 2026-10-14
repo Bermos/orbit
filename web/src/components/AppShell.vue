@@ -63,6 +63,7 @@ async function logout() {
       <div class="me">
         <span class="avatar">{{ session.user!.display_name.slice(0, 1).toUpperCase() }}</span>
         <span class="name">{{ session.user!.display_name }}</span>
+        <RouterLink to="/settings/tokens" class="settings" title="Settings" aria-label="Settings">⚙</RouterLink>
         <button class="ghost small" @click="logout">Sign out</button>
       </div>
     </nav>
@@ -107,6 +108,8 @@ async function logout() {
 .key { font-size: 12.5px; }
 .me { display: flex; align-items: center; gap: 8px; padding: 8px; border-top: 1px solid #ffffff14; }
 .me .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.me .settings { color: var(--sidebar-text); padding: 2px 6px; border-radius: 6px; }
+.me .settings:hover, .me .settings.router-link-active { background: var(--sidebar-active); text-decoration: none; }
 .me button { color: var(--sidebar-text); }
 .me button:hover { background: var(--sidebar-active); }
 .avatar {

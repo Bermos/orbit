@@ -187,12 +187,13 @@ func (s *Server) resolve(ctx context.Context, ref Ref) (Entity, error) {
 		e.Title, e.Subtitle, e.URL, e.App = name, ref.ID, "/apps/"+ref.ID, ref.ID
 	case "agent_run":
 		var agentName, status string
-		var channelID string
-		var reply, appKey *string
+		var channelID, reply, appKey, pipelineURL *string
 		err = s.DB.QueryRow(ctx, `
-			select u.username, r.status, r.channel_id, r.reply_message_id, case when r.private then r.asker_id end, c.app_key
-			  from agent_runs r join users u on u.id = r.agent_id join channels c on c.id = r.channel_id
-			 where r.id = $1`, ref.ID).Scan(&agentName, &status, &channelID, &reply, &e.owner, &appKey)
+			select u.username, r.status, r.channel_id, r.reply_message_id, case when r.private then r.asker_id end,
+			       coalesce(c.app_key, rp.app_key), '/apps/' || rp.app_key || '/repos/' || rp.name || '/pipelines/' || p.number
+			  from agent_runs r join users u on u.id = r.agent_id left join channels c on c.id = r.channel_id
+			  left join jobs j on j.id = r.job_id left join pipelines p on p.id = j.pipeline_id left join repositories rp on rp.id = p.repo_id
+			 where r.id = $1`, ref.ID).Scan(&agentName, &status, &channelID, &reply, &e.owner, &appKey, &pipelineURL)
 		if err != nil {
 			break
 		}
@@ -202,12 +203,38 @@ func (s *Server) resolve(ctx context.Context, ref Ref) (Entity, error) {
 		if appKey != nil {
 			e.App = *appKey
 		}
-		e.URL = "/channels/" + channelID
+		switch {
+		case channelID != nil:
+			e.URL = "/channels/" + *channelID
+		case pipelineURL != nil:
+			e.URL = *pipelineURL
+		}
 		if reply != nil {
 			if target, rerr := s.resolve(ctx, Ref{Type: "message", ID: *reply}); rerr == nil && !target.Missing {
 				e.URL = target.URL
 			}
 		}
+	case "pipeline":
+		var app, repo, status string
+		var number int
+		err = s.DB.QueryRow(ctx, `select r.app_key, r.name, p.number, p.status from pipelines p join repositories r on r.id = p.repo_id where p.id = $1`, ref.ID).
+			Scan(&app, &repo, &number, &status)
+		if err != nil {
+			break
+		}
+		e.Title = fmt.Sprintf("Pipeline #%d", number)
+		e.Subtitle = fmt.Sprintf("%s/%s · %s", app, repo, status)
+		e.URL = fmt.Sprintf("/apps/%s/repos/%s/pipelines/%d", app, repo, number)
+		e.App = app
+	case "branch":
+		// "app/repo:branch"
+		repoPart, branch, ok := strings.Cut(ref.ID, ":")
+		app, name, ok2 := strings.Cut(repoPart, "/")
+		if !ok || !ok2 {
+			return e, badRequest("invalid branch ref")
+		}
+		e.Title, e.Subtitle, e.App = branch, repoPart+" · branch", app
+		e.URL = "/apps/" + app + "/repos/" + name + "/tree/" + url.PathEscape(branch)
 	default:
 		return e, badRequest("unknown entity type " + ref.Type)
 	}

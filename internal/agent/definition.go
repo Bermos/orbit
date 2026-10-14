@@ -51,6 +51,15 @@ type Definition struct {
 	Tools []string `yaml:"tools" json:"tools"`
 	// MaxSteps caps model calls per answer.
 	MaxSteps int `yaml:"max_steps" json:"max_steps"`
+	// TokenBudget caps the tokens of one run (input plus output); 0 is no cap.
+	TokenBudget int64 `yaml:"budget_tokens" json:"budget_tokens,omitempty"`
+	// Runs is where the agent works when it is mentioned: "chat" answers in
+	// the thread; "job" starts a CI job on a checkout of a repository, which
+	// can change code and proposes the result as a branch.
+	Runs string `yaml:"runs" json:"runs"`
+	// Image is the container image for the agent's jobs. Runners use their
+	// default agent image when it is empty.
+	Image string `yaml:"image" json:"image,omitempty"`
 
 	Instructions string `yaml:"-" json:"-"`
 	// Source is the file the definition came from.
@@ -95,8 +104,17 @@ func Parse(data []byte) (Definition, error) {
 	if len(d.Apps) == 0 {
 		d.Apps = []string{"*"}
 	}
+	if d.Runs == "" {
+		d.Runs = "chat"
+	}
+	if d.Runs != "chat" && d.Runs != "job" {
+		return d, fmt.Errorf("invalid runs %q (chat or job)", d.Runs)
+	}
 	if d.MaxSteps <= 0 {
 		d.MaxSteps = 8
+		if d.Runs == "job" {
+			d.MaxSteps = 40
+		}
 	}
 	return d, nil
 }

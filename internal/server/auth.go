@@ -90,7 +90,7 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sign in required"})
 			return
 		}
-		u, err := s.userBySession(r.Context(), token)
+		u, err := s.userByToken(r.Context(), token)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sign in required"})
 			return

@@ -17,6 +17,16 @@ export const router = createRouter({
       props: (r) => ({ app: r.params.app, number: Number(r.params.number) }),
     },
     {
+      path: '/apps/:app/repos/:repo/pipelines',
+      component: () => import('./views/PipelinesView.vue'),
+      props: true,
+    },
+    {
+      path: '/apps/:app/repos/:repo/pipelines/:number(\\d+)',
+      component: () => import('./views/PipelineView.vue'),
+      props: (r) => ({ app: r.params.app, repo: r.params.repo, number: Number(r.params.number) }),
+    },
+    {
       path: '/apps/:app/repos/:repo/:mode(tree|blob)?/:ref?/:path(.*)*',
       component: () => import('./views/RepoView.vue'),
       props: (r) => ({
@@ -27,6 +37,7 @@ export const router = createRouter({
         path: Array.isArray(r.params.path) ? r.params.path.join('/') : r.params.path || '',
       }),
     },
+    { path: '/settings/tokens', component: () => import('./views/SettingsView.vue') },
     { path: '/channels/:id', component: () => import('./views/ChannelView.vue'), props: true },
     { path: '/:pathMatch(.*)*', component: () => import('./views/NotFoundView.vue') },
   ],

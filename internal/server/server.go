@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -35,6 +36,10 @@ type Server struct {
 	BaseURL string
 
 	agents *agentService
+	ci     *ciService
+	// background tracks goroutines such as webhook deliveries.
+	background    sync.WaitGroup
+	webhookClient *http.Client
 	// internal serves the authenticated API in-process, so agent tools and
 	// confirmed proposals go through exactly the checks people go through.
 	internal http.Handler
@@ -49,6 +54,12 @@ func New(db *pgxpool.Pool, git gitrepo.Store, web fs.FS, baseURL string) *Server
 		Access:  access.Resolver{DB: db},
 		Web:     web,
 		BaseURL: strings.TrimRight(baseURL, "/"),
+		ci:      newCI(),
+		webhookClient: &http.Client{
+			Timeout: 10 * time.Second,
+			// A hook gets exactly the URL it was given.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 	internal := chi.NewRouter()
 	internal.Route("/api/v1", s.userRoutes)
@@ -71,6 +82,7 @@ func (s *Server) Routes() http.Handler {
 	})
 
 	r.Handle("/git/*", http.HandlerFunc(s.serveGit))
+	r.Route("/api/runner/v1", s.runnerRoutes)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(middleware.Timeout(30 * time.Second))
@@ -120,6 +132,27 @@ func (s *Server) userRoutes(r chi.Router) {
 	r.Get("/apps/{app}/repos/{repo}/tree", s.handle(s.repoTree))
 	r.Get("/apps/{app}/repos/{repo}/blob", s.handle(s.repoBlob))
 	r.Get("/apps/{app}/repos/{repo}/commits", s.handle(s.repoCommits))
+	r.Get("/apps/{app}/repos/{repo}/commits/{sha}/checks", s.handle(s.listChecks))
+	r.Post("/apps/{app}/repos/{repo}/commits/{sha}/checks", s.handle(s.reportCheck))
+	r.Get("/apps/{app}/repos/{repo}/pipelines", s.handle(s.listPipelines))
+	r.Post("/apps/{app}/repos/{repo}/pipelines", s.handle(s.runPipeline))
+	r.Get("/apps/{app}/repos/{repo}/pipelines/{number}", s.handle(s.getPipeline))
+	r.Post("/apps/{app}/repos/{repo}/pipelines/{number}/cancel", s.handle(s.cancelPipeline))
+	r.Get("/jobs/{jobID}/logs", s.handle(s.jobLogs))
+	r.Get("/jobs/{jobID}/patch", s.handle(s.jobPatch))
+
+	r.Get("/apps/{app}/webhooks", s.handle(s.listWebhooks))
+	r.Post("/apps/{app}/webhooks", s.handle(s.createWebhook))
+	r.Delete("/apps/{app}/webhooks/{hookID}", s.handle(s.deleteWebhook))
+	r.Get("/apps/{app}/webhooks/{hookID}/deliveries", s.handle(s.listDeliveries))
+
+	r.Get("/runners", s.handle(s.listRunners))
+	r.Post("/runners", s.handle(s.createRunner))
+	r.Delete("/runners/{runnerID}", s.handle(s.deleteRunner))
+
+	r.Get("/me/tokens", s.handle(s.listTokens))
+	r.Post("/me/tokens", s.handle(s.createToken))
+	r.Delete("/me/tokens/{tokenID}", s.handle(s.deleteToken))
 
 	r.Get("/apps/{app}/issues", s.handle(s.listIssues))
 	r.Post("/apps/{app}/issues", s.handle(s.createIssue))
