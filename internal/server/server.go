@@ -166,6 +166,10 @@ func (s *Server) userRoutes(r chi.Router) {
 	r.Post("/channels/{channelID}/messages", s.handle(s.postMessage))
 	r.Get("/messages/{messageID}", s.handle(s.getMessage))
 
+	r.Get("/direct-chats", s.handle(s.listDirectChats))
+	r.Post("/direct-chats", s.handle(s.createDirectChat))
+	r.Delete("/direct-chats/{channelID}", s.handle(s.deleteDirectChat))
+
 	r.Get("/todos", s.handle(s.listTodos))
 	r.Post("/todos", s.handle(s.createTodo))
 	r.Patch("/todos/{todoID}", s.handle(s.updateTodo))

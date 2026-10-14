@@ -6,7 +6,8 @@ import EntityChip from './EntityChip.vue'
 import ProposalCard from './ProposalCard.vue'
 import StatusDot from './StatusDot.vue'
 
-defineProps<{ message: Message; inThread?: boolean }>()
+// privateChat drops the "only you" marking: everything in a private chat is.
+defineProps<{ message: Message; inThread?: boolean; privateChat?: boolean }>()
 const emit = defineEmits<{ reply: []; todo: []; issue: []; links: [] }>()
 
 function time(s: string) {
@@ -17,13 +18,13 @@ function time(s: string) {
 </script>
 
 <template>
-  <div :id="`msg-${message.id}`" class="msg" :class="{ system: !message.author, agent: message.author?.kind === 'agent', private: message.private }">
+  <div :id="`msg-${message.id}`" class="msg" :class="{ system: !message.author, agent: message.author?.kind === 'agent', private: message.private && !privateChat }">
     <div class="avatar">{{ message.author ? (message.author.kind === 'agent' ? '✦' : message.author.display_name.slice(0, 1).toUpperCase()) : '◎' }}</div>
     <div class="content">
       <div class="meta">
         <strong>{{ message.author?.display_name ?? 'Orbit' }}</strong>
         <span v-if="message.author?.kind === 'agent'" class="badge accent small">agent</span>
-        <span v-if="message.private" class="badge small" title="Only you can see this">🔒 only you</span>
+        <span v-if="message.private && !privateChat" class="badge small" title="Only you can see this">🔒 only you</span>
         <span class="muted small">{{ time(message.created_at) }}</span>
       </div>
       <div v-if="message.body" class="body">{{ message.body }}</div>

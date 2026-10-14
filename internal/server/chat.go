@@ -19,20 +19,28 @@ import (
 type Channel struct {
 	ID        string    `json:"id"`
 	AppKey    *string   `json:"app_key"`
-	Kind      string    `json:"kind"`
+	Kind      string    `json:"kind"` // "chat", "issue" or "direct"
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+	// Direct channels are one person's private chat with one agent.
+	OwnerID       *string    `json:"owner_id,omitempty"`
+	Agent         *string    `json:"agent,omitempty"`
+	LastMessageAt *time.Time `json:"last_message_at,omitempty"`
 }
 
-const channelCols = `c.id, c.app_key, c.kind, c.name, c.created_at`
+const channelCols = `c.id, c.app_key, c.kind, c.name, c.created_at, c.owner_id,
+	(select a.username from users a where a.id = c.agent_id), c.last_message_at`
 
 func scanChannels(rows pgx.Rows) ([]Channel, error) {
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Channel, error) {
 		var c Channel
-		err := row.Scan(&c.ID, &c.AppKey, &c.Kind, &c.Name, &c.CreatedAt)
+		err := row.Scan(&c.ID, &c.AppKey, &c.Kind, &c.Name, &c.CreatedAt, &c.OwnerID, &c.Agent, &c.LastMessageAt)
 		return c, err
 	})
 }
+
+// direct reports whether the channel is a private chat with an agent.
+func (c Channel) direct() bool { return c.Kind == "direct" }
 
 // Author is the public view of a message author. Nil for system messages.
 type Author struct {
@@ -112,6 +120,9 @@ func (s *Server) loadChannel(ctx context.Context, r *http.Request, id string) (C
 	if len(chs) == 0 {
 		return Channel{}, errNotFound
 	}
+	if chs[0].direct() && *chs[0].OwnerID != currentUser(r).ID {
+		return Channel{}, errNotFound
+	}
 	if chs[0].AppKey != nil {
 		if _, err := s.requireRole(r, *chs[0].AppKey, access.Reader); err != nil {
 			return Channel{}, err
@@ -160,8 +171,8 @@ func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
-	rows, err := s.DB.Query(r.Context(), `insert into channels (app_key, kind, name) values ($1, 'chat', $2)
-		returning id, app_key, kind, name, created_at`, in.AppKey, in.Name)
+	rows, err := s.DB.Query(r.Context(), `insert into channels as c (app_key, kind, name) values ($1, 'chat', $2)
+		returning `+channelCols, in.AppKey, in.Name)
 	if err != nil {
 		return err
 	}
@@ -350,7 +361,15 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 	mentioned := s.agents.mentioned(in.Body)
-	if in.Private && !privateThread && len(mentioned) == 0 {
+	if ch.direct() {
+		// Everything in a private chat is the owner's alone, and the chat's
+		// agent answers every message without being mentioned.
+		in.Private = true
+		mentioned = nil
+		if def, ok := s.agents.byUsername(*ch.Agent); ok {
+			mentioned = append(mentioned, def)
+		}
+	} else if in.Private && !privateThread && len(mentioned) == 0 {
 		return badRequest("private messages are for asking an agent: mention one, for example @assistant")
 	}
 
@@ -394,8 +413,19 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 	}
+	if ch.direct() {
+		// A new chat takes its title from its first message.
+		if err := tx.QueryRow(ctx, `update channels set last_message_at = now(),
+			name = case when name = '' and $2::uuid is null then $3 else name end
+			where id = $1 returning name, last_message_at`, ch.ID, in.ThreadID, chatTitle(in.Body)).Scan(&ch.Name, &ch.LastMessageAt); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
+	}
+	if ch.direct() {
+		s.Hub.Publish("user:"+u.ID, "direct.updated", ch)
 	}
 	m, err := s.messageByID(ctx, id, u.ID)
 	if err != nil {
@@ -486,9 +516,12 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 			role, err := s.Access.AppRole(ctx, u.ID, app)
 			return err == nil && role >= access.Reader
 		case "channel":
-			var app *string
-			if err := s.DB.QueryRow(ctx, `select app_key from channels where id = $1`, id).Scan(&app); err != nil {
+			var app, owner *string
+			if err := s.DB.QueryRow(ctx, `select app_key, owner_id from channels where id = $1`, id).Scan(&app, &owner); err != nil {
 				return false
+			}
+			if owner != nil {
+				return *owner == u.ID
 			}
 			if app == nil {
 				return true
