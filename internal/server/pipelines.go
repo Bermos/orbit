@@ -271,9 +271,10 @@ func (s *Server) createPipeline(ctx context.Context, repo Repo, commit, ref, tri
 	return p, nil
 }
 
-// onPush reacts to new commits on a branch: webhooks first, then the
-// branch's pipeline, if its file asks for one.
+// onPush reacts to new commits on a branch: merge requests follow it, then
+// webhooks, then the branch's pipeline, if its file asks for one.
 func (s *Server) onPush(ctx context.Context, repo Repo, pusher User, branch, before, after string) {
+	s.syncMergeRequests(ctx, repo, pusher, branch, after)
 	s.deliverWebhooks(ctx, repo, "push", map[string]any{
 		"ref": "refs/heads/" + branch, "branch": branch, "before": before, "after": after,
 		"pusher": map[string]any{"id": pusher.ID, "username": pusher.Username, "display_name": pusher.DisplayName},

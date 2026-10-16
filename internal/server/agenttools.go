@@ -12,6 +12,7 @@ import (
 
 	"github.com/Bermos/orbit/internal/access"
 	"github.com/Bermos/orbit/internal/agent"
+	"github.com/Bermos/orbit/internal/gitrepo"
 )
 
 // Orbit's tools for agents: a small, typed set over the public API. Every
@@ -68,6 +69,11 @@ var tools = []tool{
 			"app":    str("Application key."),
 			"number": num("Issue number."),
 		})}, run: (*toolbox).getIssue},
+	{spec: agent.ToolSpec{Name: "get_merge_request", Description: "Read a merge request: its fields, checks, reviews, whether it can be merged, the diff and the review discussion (comments on the diff name the file and lines they discuss).",
+		Schema: schema([]string{"app", "number"}, map[string]any{
+			"app":    str("Application key."),
+			"number": num("Merge request number (ledger!3 is number 3)."),
+		})}, run: (*toolbox).getMergeRequest},
 	{spec: agent.ToolSpec{Name: "get_thread", Description: "Read a message with its whole thread and the thread's links (issues, to-dos and code it is connected to).",
 		Schema: schema([]string{"message_id"}, map[string]any{
 			"message_id": str("ID of any message in the thread."),
@@ -397,6 +403,83 @@ func (t *toolbox) getIssue(ctx context.Context, in json.RawMessage) (any, error)
 		issue["assignee"] = "@" + i.Assignee.Username
 	}
 	return map[string]any{"issue": issue, "links": t.links(ctx, res.Links), "discussion": t.messages(discussion)}, nil
+}
+
+// maxToolDiffLines bounds the diff a merge request shows a model.
+const maxToolDiffLines = 800
+
+func (t *toolbox) getMergeRequest(ctx context.Context, in json.RawMessage) (any, error) {
+	args, err := decode[struct {
+		App    string `json:"app"`
+		Number int    `json:"number"`
+	}](in)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.requireApp(ctx, args.App); err != nil {
+		return nil, err
+	}
+	base := fmt.Sprintf("/apps/%s/merge-requests/%d", url.PathEscape(args.App), args.Number)
+	var res struct {
+		MergeRequest MergeRequest `json:"merge_request"`
+		Links        []LinkView   `json:"links"`
+		Checks       []Check      `json:"checks"`
+		Reviews      []Review     `json:"reviews"`
+		MergeStatus  MergeStatus  `json:"merge_status"`
+	}
+	if err := t.api(ctx, "GET", base, nil, &res); err != nil {
+		return nil, err
+	}
+	var diff struct {
+		Files []gitrepo.DiffFile `json:"files"`
+	}
+	if err := t.api(ctx, "GET", base+"/diff", nil, &diff); err != nil {
+		return nil, err
+	}
+	var discussion []Message
+	if err := t.api(ctx, "GET", "/channels/"+res.MergeRequest.ChannelID+"/messages", nil, &discussion); err != nil {
+		return nil, err
+	}
+	if len(discussion) > 60 {
+		discussion = discussion[len(discussion)-60:]
+	}
+	m := res.MergeRequest
+	mr := map[string]any{"reference": m.reference(), "title": m.Title, "body": truncate(m.Body, 6000), "status": m.Status, "draft": m.Draft,
+		"repo": m.AppKey + "/" + m.Repo, "source_branch": m.SourceBranch, "target_branch": m.TargetBranch,
+		"head_commit": m.HeadSHA, "base_commit": m.BaseSHA, "created_at": m.CreatedAt.UTC().Format("2006-01-02")}
+	if m.Author != nil {
+		mr["author"] = "@" + m.Author.Username
+	}
+	checks := []map[string]any{}
+	for _, c := range res.Checks {
+		checks = append(checks, map[string]any{"name": c.Name, "status": c.Status, "summary": truncate(c.Summary, 300)})
+	}
+	reviews := []map[string]any{}
+	for _, v := range res.Reviews {
+		reviews = append(reviews, map[string]any{"reviewer": "@" + v.User.Username, "state": v.State, "outdated": v.Outdated})
+	}
+	var b strings.Builder
+	lines, files := 0, []map[string]any{}
+	for _, f := range diff.Files {
+		files = append(files, map[string]any{"old_path": f.OldPath, "new_path": f.NewPath, "status": f.Status, "additions": f.Additions, "deletions": f.Deletions})
+		if f.Binary || f.TooLarge || lines >= maxToolDiffLines {
+			continue
+		}
+		fmt.Fprintf(&b, "--- %s\n+++ %s\n", f.OldPath, f.NewPath)
+		for _, h := range f.Hunks {
+			b.WriteString(h.Header + "\n")
+			for _, l := range h.Lines {
+				prefix := map[string]string{"add": "+", "del": "-", "context": " "}[l.Kind]
+				b.WriteString(prefix + l.Text + "\n")
+				lines++
+			}
+		}
+	}
+	if lines >= maxToolDiffLines {
+		b.WriteString("[diff truncated; read the files with read_file at the head commit]\n")
+	}
+	return map[string]any{"merge_request": mr, "checks": checks, "reviews": reviews, "merge_status": res.MergeStatus,
+		"files": files, "diff": b.String(), "links": t.links(ctx, res.Links), "discussion": t.messages(discussion)}, nil
 }
 
 func (t *toolbox) getThread(ctx context.Context, in json.RawMessage) (any, error) {

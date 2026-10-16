@@ -19,9 +19,10 @@ watch(
   () => props.id,
   async (id) => {
     const res = await api.channel(id)
-    // Issue discussions live on the issue page.
-    if (res.issue_url) {
-      router.replace({ path: res.issue_url, query: route.query })
+    // Issue and merge request discussions live on their pages.
+    const page = res.issue_url ?? res.merge_request_url
+    if (page) {
+      router.replace({ path: page, query: route.query })
       return
     }
     channel.value = res.channel

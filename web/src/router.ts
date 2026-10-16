@@ -17,6 +17,16 @@ export const router = createRouter({
       props: (r) => ({ app: r.params.app, number: Number(r.params.number) }),
     },
     {
+      path: '/apps/:app/merge-requests/:number(\\d+)',
+      component: () => import('./views/MergeRequestView.vue'),
+      props: (r) => ({ app: r.params.app, number: Number(r.params.number) }),
+    },
+    {
+      path: '/apps/:app/repos/:repo/merge-requests',
+      component: () => import('./views/RepoMergeRequestsView.vue'),
+      props: true,
+    },
+    {
       path: '/apps/:app/repos/:repo/pipelines',
       component: () => import('./views/PipelinesView.vue'),
       props: true,

@@ -48,6 +48,7 @@ const (
 	LinkProposedBy  = "proposed_by"  // entity an agent drafted and a person confirmed
 	LinkMentions    = "mentions"
 	LinkRelates     = "relates_to"
+	LinkCloses      = "closes" // merge request closes an issue when merged
 )
 
 // CodeRange is a line range in a file pinned to a commit, so it stays valid
@@ -110,12 +111,13 @@ func (s *Server) resolve(ctx context.Context, ref Ref) (Entity, error) {
 		var body, channelID, kind, channelName string
 		var appKey *string
 		var threadID *string
-		var issueNumber *int
+		var issueNumber, mrNumber *int
 		err = s.DB.QueryRow(ctx, `
-			select m.body, m.channel_id, m.thread_id, c.kind, c.name, c.app_key, i.number, m.visible_to
+			select m.body, m.channel_id, m.thread_id, c.kind, c.name, c.app_key, i.number, mr.number, m.visible_to
 			  from messages m join channels c on c.id = m.channel_id
 			  left join issues i on i.channel_id = c.id
-			 where m.id = $1`, ref.ID).Scan(&body, &channelID, &threadID, &kind, &channelName, &appKey, &issueNumber, &e.owner)
+			  left join merge_requests mr on mr.channel_id = c.id
+			 where m.id = $1`, ref.ID).Scan(&body, &channelID, &threadID, &kind, &channelName, &appKey, &issueNumber, &mrNumber, &e.owner)
 		if err != nil {
 			break
 		}
@@ -131,6 +133,9 @@ func (s *Server) resolve(ctx context.Context, ref Ref) (Entity, error) {
 		if kind == "issue" && appKey != nil && issueNumber != nil {
 			e.Subtitle = fmt.Sprintf("%s#%d", *appKey, *issueNumber)
 			e.URL = fmt.Sprintf("/apps/%s/issues/%d?%s", *appKey, *issueNumber, q.Encode())
+		} else if kind == "merge_request" && appKey != nil && mrNumber != nil {
+			e.Subtitle = fmt.Sprintf("%s!%d", *appKey, *mrNumber)
+			e.URL = fmt.Sprintf("/apps/%s/merge-requests/%d?%s", *appKey, *mrNumber, q.Encode())
 		} else {
 			e.Subtitle = "#" + channelName
 			if kind == "direct" {
@@ -151,6 +156,17 @@ func (s *Server) resolve(ctx context.Context, ref Ref) (Entity, error) {
 		e.Title = title
 		e.Subtitle = fmt.Sprintf("%s#%d · %s", app, number, strings.ReplaceAll(status, "_", " "))
 		e.URL = fmt.Sprintf("/apps/%s/issues/%d", app, number)
+		e.App = app
+	case "merge_request":
+		var app, title, status string
+		var number int
+		err = s.DB.QueryRow(ctx, `select app_key, number, title, status from merge_requests where id = $1`, ref.ID).Scan(&app, &number, &title, &status)
+		if err != nil {
+			break
+		}
+		e.Title = title
+		e.Subtitle = fmt.Sprintf("%s!%d · %s", app, number, status)
+		e.URL = fmt.Sprintf("/apps/%s/merge-requests/%d", app, number)
 		e.App = app
 	case "todo":
 		var title string

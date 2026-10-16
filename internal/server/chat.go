@@ -197,6 +197,9 @@ func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) error {
 			out["issue_url"] = fmt.Sprintf("/apps/%s/issues/%d", app, number)
 		}
 	}
+	if mr, err := s.mergeRequestForChannel(r.Context(), ch); err == nil {
+		out["merge_request_url"] = mr.url()
+	}
 	writeJSON(w, http.StatusOK, out)
 	return nil
 }
@@ -403,12 +406,20 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) error {
 		if err := addLink(ctx, tx, Ref{Type: "message", ID: id}, codeRef, LinkDiscusses, nil, u.ID); err != nil {
 			return err
 		}
-		if ch.Kind == "issue" {
-			var issueID string
-			if err := tx.QueryRow(ctx, `select id from issues where channel_id = $1`, ch.ID).Scan(&issueID); err != nil {
-				return err
-			}
-			if err := addLink(ctx, tx, Ref{Type: "issue", ID: issueID}, codeRef, LinkDiscusses, map[string]any{"message_id": id}, u.ID); err != nil {
+		var owner Ref
+		switch ch.Kind {
+		case "issue":
+			owner.Type = "issue"
+			err = tx.QueryRow(ctx, `select id from issues where channel_id = $1`, ch.ID).Scan(&owner.ID)
+		case "merge_request":
+			owner.Type = "merge_request"
+			err = tx.QueryRow(ctx, `select id from merge_requests where channel_id = $1`, ch.ID).Scan(&owner.ID)
+		}
+		if err != nil {
+			return err
+		}
+		if owner.Type != "" {
+			if err := addLink(ctx, tx, owner, codeRef, LinkDiscusses, map[string]any{"message_id": id}, u.ID); err != nil {
 				return err
 			}
 		}

@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, roleRank, type AppDetail, type Issue, type Team } from '../api'
 import CiSettings from '../components/CiSettings.vue'
+import MergeRequestList from '../components/MergeRequestList.vue'
 import Modal from '../components/Modal.vue'
 import { useToasts } from '../stores/toast'
 
@@ -100,6 +101,7 @@ async function removeMapping(team: string) {
     <nav class="tabs">
       <RouterLink :to="{ query: {} }" :class="{ active: tab === 'overview' }">Overview</RouterLink>
       <RouterLink :to="{ query: { tab: 'issues' } }" :class="{ active: tab === 'issues' }">Issues</RouterLink>
+      <RouterLink :to="{ query: { tab: 'merge-requests' } }" :class="{ active: tab === 'merge-requests' }">Merge requests</RouterLink>
       <RouterLink v-if="canMaintain" :to="{ query: { tab: 'ci' } }" :class="{ active: tab === 'ci' }">CI</RouterLink>
     </nav>
 
@@ -164,6 +166,8 @@ async function removeMapping(team: string) {
     </div>
 
     <CiSettings v-else-if="tab === 'ci'" :detail="detail" />
+
+    <MergeRequestList v-else-if="tab === 'merge-requests'" :app="app" :can-create="!!canDevelop && detail.repositories.length > 0" />
 
     <div v-else>
       <div class="row filter">

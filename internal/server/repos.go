@@ -54,6 +54,22 @@ func (s *Server) loadRepo(r *http.Request, min access.Role) (Repo, error) {
 	return repos[0], nil
 }
 
+// repoByName loads a repository without checking access.
+func (s *Server) repoByName(ctx context.Context, app, name string) (Repo, error) {
+	rows, err := s.DB.Query(ctx, `select `+repoCols+` from repositories r where r.app_key = $1 and r.name = $2`, app, name)
+	if err != nil {
+		return Repo{}, err
+	}
+	repos, err := scanRepos(rows)
+	if err != nil {
+		return Repo{}, err
+	}
+	if len(repos) == 0 {
+		return Repo{}, errNotFound
+	}
+	return repos[0], nil
+}
+
 func (s *Server) createRepo(w http.ResponseWriter, r *http.Request) error {
 	app := chi.URLParam(r, "app")
 	var in struct {

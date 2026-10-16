@@ -10,12 +10,16 @@ function label(l: LinkView): string {
     discusses: 'Discusses',
     mentions: 'Mentions',
     relates_to: 'Related to',
+    closes: 'Closes when merged',
+    proposed_by: 'Proposed by',
   }
   const inbound: Record<string, string> = {
     created_from: 'Led to',
     discusses: 'Discussed in',
     mentions: 'Mentioned in',
     relates_to: 'Related to',
+    closes: 'Closed by merging',
+    proposed_by: 'Proposed',
   }
   return (l.direction === 'out' ? out : inbound)[l.kind] ?? l.kind
 }

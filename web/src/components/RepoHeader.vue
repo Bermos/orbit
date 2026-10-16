@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { RepoDetail } from '../api'
 
-defineProps<{ app: string; repo: string; detail: RepoDetail | null; tab: 'code' | 'commits' | 'pipelines'; gitRef?: string }>()
+defineProps<{ app: string; repo: string; detail: RepoDetail | null; tab: 'code' | 'commits' | 'merge_requests' | 'pipelines'; gitRef?: string }>()
 </script>
 
 <template>
@@ -21,6 +21,7 @@ defineProps<{ app: string; repo: string; detail: RepoDetail | null; tab: 'code' 
     <RouterLink :to="{ path: `/apps/${app}/repos/${repo}${gitRef ? '/tree/' + gitRef : ''}`, query: { tab: 'commits' } }" :class="{ active: tab === 'commits' }">
       Commits
     </RouterLink>
+    <RouterLink :to="`/apps/${app}/repos/${repo}/merge-requests`" :class="{ active: tab === 'merge_requests' }">Merge requests</RouterLink>
     <RouterLink :to="`/apps/${app}/repos/${repo}/pipelines`" :class="{ active: tab === 'pipelines' }">Pipelines</RouterLink>
   </nav>
 </template>

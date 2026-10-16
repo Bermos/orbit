@@ -2,7 +2,17 @@
 import type { Entity } from '../api'
 defineProps<{ entity: Entity }>()
 
-const icons: Record<string, string> = { message: '💬', issue: '◉', todo: '☐', code: '⟨⟩', repo: '⎇', app: '▣' }
+const icons: Record<string, string> = {
+  message: '💬',
+  issue: '◉',
+  merge_request: '⇄',
+  todo: '☐',
+  code: '⟨⟩',
+  repo: '⎇',
+  branch: '⑂',
+  app: '▣',
+  pipeline: '▶',
+}
 </script>
 
 <template>
