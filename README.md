@@ -24,8 +24,9 @@ Orbit is a self-hosted platform where code, chat, issues, planning, reviews and 
 - Full-text search over applications, issues and messages
 - Agents in chat: start a private chat with an agent, or @mention one in a channel or issue discussion and it answers in the thread, using Orbit's own tools (see [Agents](#agents))
 - CI: pipelines from `.orbit/pipeline.yml` run on Kubernetes by pull-based runners, a checks API and webhooks for any other CI, personal access tokens, and agents that change code as CI jobs (see [CI](#ci))
+- Merge requests: review a branch's diff with comments on its lines that are part of the conversation (threads, agents, to-dos and issues work on them), checks and approvals, and merging that closes the issues it fixes (see [Merge requests](#merge-requests))
 
-Not yet: code review and merge requests, epics and boards, notifications, OIDC and LDAP, and a Helm chart.
+Not yet: epics and boards, notifications, OIDC and LDAP, and a Helm chart.
 
 ## Run it
 
@@ -110,11 +111,25 @@ You help the ledger team. Cite issues as ledger#123 and files with line numbers.
 
 **Writes are proposals.** Agents cannot change anything themselves. They draft issues, to-dos and issue comments, shown under the answer with a button; only the person who asked can confirm, and confirming runs the write through the public API with their permissions. The created entity links back to the conversation and to the agent run.
 
-**Tools** are a small typed set over the public API, run in-process as the asker: `search`, `list_issues`, `get_issue`, `get_thread`, `get_application`, `list_files`, `read_file`, `list_my_todos` (private questions only), `propose_issue`, `propose_todo` and `propose_issue_comment`.
+**Tools** are a small typed set over the public API, run in-process as the asker: `search`, `list_issues`, `get_issue`, `get_merge_request`, `get_thread`, `get_application`, `list_files`, `read_file`, `list_my_todos` (private questions only), `propose_issue`, `propose_todo` and `propose_issue_comment`.
 
 **Models.** Providers are pluggable (`internal/agent`). Orbit includes an Anthropic provider and a deterministic `fake` provider that tests and local runs use, so the whole flow works without credentials.
 
 Agents with `runs: job` change code: see [Agent jobs](#agent-jobs).
+
+## Merge requests
+
+A merge request proposes merging a branch into another branch of the same repository. They are numbered per application next to issues: `ledger#12` is an issue, `ledger!3` a merge request. Open one from a repository's *Merge requests* tab, or from the code view of a branch; agents open them for the branches they push.
+
+- **Comments on the diff are conversation.** Click a line of the diff (shift-click for a range) to comment on it. The comment is a message in the merge request's discussion that carries the lines it discusses, pinned to the source branch's tip, or to the merge base for removed lines. So it has a thread, @mentioning an agent there gets an answer in the thread, and any comment can become a to-do or an issue. Comments follow their lines across pushes while those lines stay unchanged, and are listed as outdated once they change.
+- **Checks gate the merge.** The merge request shows the checks of its source branch's tip, Orbit's pipelines and any external CI alike. Failing or unfinished checks, and a reviewer's request for changes, block merging; a maintainer can merge anyway, which is noted in the discussion. Conflicts always block.
+- **Reviews.** Developers other than the author approve or request changes. A review stays on the version it was given for and is marked as on an earlier version after a push.
+- **Merging** creates a merge commit or squashes into one commit, on the server, and can delete the source branch. The target branch then runs its pipeline like after a push. Pushing the source branch's commits to the target by hand marks the merge request merged too.
+- **Issues close on merge.** "Closes #4", "fixes ledger#7" or "resolves #4, #5" in the description links the merge request to those issues, notes it in their discussions, and marks them done when it is merged.
+
+Opening a merge request, reviewing and merging need the developer role; the author can also edit and close their own. The reviewed commits stay reachable under `refs/orbit/merge-requests/<number>/head` after the branch is deleted.
+
+API: `GET`/`POST /api/v1/apps/{app}/merge-requests` (`{"repo": "api", "source_branch": "fix-rounding", "target_branch": "main", "title": "...", "body": "Closes #4", "draft": false}`), `GET`/`PATCH /apps/{app}/merge-requests/{number}` (title, body, draft, `status` open or closed), `GET .../diff`, `GET .../commits`, `POST .../reviews` (`{"state": "approved"}`, `"changes_requested"`, or `""` to withdraw), and `POST .../merge` (`{"strategy": "merge" or "squash", "delete_source_branch": true, "force": false}`). Comments on lines are messages posted to the merge request's `channel_id` with a `code` range, as for discussing code anywhere.
 
 ## CI
 
@@ -179,7 +194,7 @@ curl -X POST "$ORBIT/api/v1/apps/ledger/repos/api/commits/$SHA/checks" \
 
 `status` is one of `pending`, `running`, `success`, `failure`, `error`, `cancelled`, `skipped`; reporting the same `name` again updates the check. Reporting needs the developer role; `orbit/` names are reserved. Personal access tokens also work as the password for `git` over HTTPS.
 
-Webhooks (an application's CI tab, maintainers) send `push`, `check` and `pipeline` events, optionally for one repository only, to trigger and follow external systems. Each request carries `X-Orbit-Event` and `X-Orbit-Signature: sha256=<HMAC-SHA256 of the body with the hook's secret>`. Deliveries are attempted once and listed under the hook.
+Webhooks (an application's CI tab, maintainers) send `push`, `check`, `pipeline` and `merge_request` events, optionally for one repository only, to trigger and follow external systems. Each request carries `X-Orbit-Event` and `X-Orbit-Signature: sha256=<HMAC-SHA256 of the body with the hook's secret>`. Deliveries are attempted once and listed under the hook.
 
 ### Agent jobs
 
@@ -193,12 +208,12 @@ The repository is the one named as `app/repo` (optionally `@branch`), otherwise 
 
 - **The model stays on the server.** Orbit runs the agent loop with the same rule as chat: the agent acts for the person with the minimum of their role and its own. Tools that touch the checkout (`list_files`, `read_file`, `write_file`, `edit_file`, `run`) are sent to the runner and run in the job's pod; Orbit's read tools (`search`, `get_issue`, ...) run on the server. Model credentials never reach the runner.
 - **Progress shows where it was asked.** The reply in the thread follows the job, and every tool call lands in the job's log.
-- **Nothing is pushed without a person.** The runner hands back the changes as a diff. The reply offers to push them as a branch (`agent/<agent>-<pipeline>`); only the person who asked can confirm, which needs the developer role for both them and the agent. The commit is authored by the agent and committed by that person, and the new branch runs its pipeline like any push.
+- **Nothing is pushed without a person.** The runner hands back the changes as a diff. The reply offers to push them as a branch (`agent/<agent>-<pipeline>`) with a merge request into the branch the job started from; asked in a merge request's discussion, the agent works on its source branch and the reply offers to push to it instead. Only the person who asked can confirm, which needs the developer role for both them and the agent. The commit is authored by the agent and committed by that person, and the push runs its pipeline like any other.
 - **Bounded.** Jobs time out (30 minutes by default), and `max_steps` and `budget_tokens` in the agent's definition cap model calls and tokens.
 
 Job pods carry the label `app.kubernetes.io/managed-by=orbit-runner` and agent pods also `orbit.dev/kind=agent`. The runner manifest ships two NetworkPolicies: CI jobs reach Orbit, DNS and the public internet but not the cluster or private networks; agent jobs reach only Orbit and DNS.
 
-Not yet: pausing a job to ask a person a question, merge requests for agent branches, artifacts and caches, secrets for jobs, retrying failed webhook deliveries, and an importer for `.gitlab-ci.yml`.
+Not yet: pausing a job to ask a person a question, artifacts and caches, secrets for jobs, retrying failed webhook deliveries, and an importer for `.gitlab-ci.yml`.
 
 ### Tests
 

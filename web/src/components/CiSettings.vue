@@ -9,11 +9,11 @@ const props = defineProps<{ detail: AppDetail }>()
 const toasts = useToasts()
 const app = () => props.detail.application.key
 const hooks = ref<Webhook[]>([])
-const form = ref({ url: '', repo: '', events: ['push', 'check', 'pipeline'] as WebhookEvent[] })
+const form = ref({ url: '', repo: '', events: ['push', 'check', 'pipeline', 'merge_request'] as WebhookEvent[] })
 const secret = ref('')
 const openHook = ref<string | null>(null)
 const deliveries = ref<WebhookDelivery[]>([])
-const allEvents: WebhookEvent[] = ['push', 'check', 'pipeline']
+const allEvents: WebhookEvent[] = ['push', 'check', 'pipeline', 'merge_request']
 const origin = location.origin
 
 async function load() {

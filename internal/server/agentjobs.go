@@ -52,8 +52,9 @@ type jobTarget struct {
 var repoMentionRE = regexp.MustCompile(`(?:^|[\s(])([a-z0-9][a-z0-9-]{0,38}[a-z0-9])/([a-z0-9][a-z0-9._-]{0,62})(?:@([^\s)]+))?`)
 
 // agentJobTarget picks the repository for an agent mentioned in chat: one
-// named as app/repo (optionally @branch) in the message, else the code the
-// message or its thread discusses, else the conversation's application's only
+// named as app/repo (optionally @branch) in the message, else the source
+// branch of the merge request being discussed, else the code the message or
+// its thread discusses, else the conversation's application's only
 // repository.
 func (s *Server) agentJobTarget(ctx context.Context, ch Channel, trigger Message) (jobTarget, error) {
 	load := func(app, name string) (Repo, bool) {
@@ -74,6 +75,12 @@ func (s *Server) agentJobTarget(ctx context.Context, ch Channel, trigger Message
 				ref = strings.TrimRight(m[3], ".,;:")
 			}
 			return jobTarget{repo: repo, ref: ref}, nil
+		}
+	}
+	// In a merge request's discussion, work on its source branch.
+	if mr, err := s.mergeRequestForChannel(ctx, ch); err == nil && mr.Status == "open" {
+		if repo, ok := load(mr.AppKey, mr.Repo); ok {
+			return jobTarget{repo: repo, ref: mr.SourceBranch}, nil
 		}
 	}
 	root := trigger.ID
@@ -385,7 +392,7 @@ func (s *Server) agentJobPrompt(ctx context.Context, def agent.Definition, asker
 	note := fmt.Sprintf("You are working in a CI job on a fresh checkout of repository %s/%s at commit %s (%s). "+
 		"The tools list_files, read_file, write_file, edit_file and run work on that checkout; run executes shell commands in the job's sandboxed container. "+
 		"Make the change, check it (build, run the tests) where you can, and then answer with a short summary of what you changed and how you checked it. "+
-		"Your changes are not pushed: @%s sees them as a proposed branch and pushes it with one click.",
+		"Your changes are not pushed: @%s sees them as a proposal and pushes them with one click, to a new branch with a merge request, or, when you were asked in a merge request, to its branch.",
 		asg.App, asg.Repo, asg.Commit, asg.Ref, asker.Username)
 	if trigger.ID != "" {
 		return s.agentPrompt(ctx, def, asker, ch, trigger, note)
@@ -568,11 +575,13 @@ func (s *Server) afterAgentJob(ctx context.Context, j runningJob, f pipeline.Fin
 		return
 	}
 	jobStatus, jobErr := f.Status, f.Error
-	var commit string
+	var commit, ref string
 	var number int
 	var patch []byte
-	if err := s.DB.QueryRow(ctx, `select coalesce(j.patch, ''), p.commit_sha, p.number from jobs j join pipelines p on p.id = j.pipeline_id where j.id = $1`, j.ID).
-		Scan(&patch, &commit, &number); err != nil {
+	var channelID *string
+	if err := s.DB.QueryRow(ctx, `select coalesce(j.patch, ''), p.commit_sha, p.ref, p.number, r.channel_id from jobs j join pipelines p on p.id = j.pipeline_id
+		join agent_runs r on r.job_id = j.id where j.id = $1`, j.ID).
+		Scan(&patch, &commit, &ref, &number, &channelID); err != nil {
 		slog.Error("load agent job", "job", j.ID, "err", err)
 		return
 	}
@@ -594,7 +603,23 @@ func (s *Server) afterAgentJob(ctx context.Context, j runningJob, f pipeline.Fin
 			Branch: fmt.Sprintf("agent/%s-%d", strings.TrimPrefix(j.Spec.Name, "agent-"), number),
 			Title:  fmt.Sprintf("%d %s changed", files, plural(files, "file", "files")),
 		}
-		if _, err := s.createProposal(ctx, runID, "branch", in); err != nil {
+		kind := "branch"
+		mr, mrErr := s.mergeRequestOfRun(ctx, channelID)
+		switch {
+		case mrErr == nil && mr.Status == "open" && mr.SourceBranch == ref && mr.Repo == j.Repo && mr.AppKey == j.App:
+			// Asked in a merge request: add the changes to it.
+			kind, in.Branch, in.Number = "merge_request_push", mr.SourceBranch, mr.Number
+		default:
+			// Otherwise the new branch gets a merge request into the branch
+			// the job started from, or the default branch.
+			in.Target = ref
+			if _, err := s.Git.ResolveCommit(ctx, j.App, j.Repo, "refs/heads/"+ref); err != nil {
+				if repo, err := s.repoByName(ctx, j.App, j.Repo); err == nil {
+					in.Target = repo.DefaultBranch
+				}
+			}
+		}
+		if _, err := s.createProposal(ctx, runID, kind, in); err != nil {
 			slog.Error("propose branch", "job", j.ID, "err", err)
 		}
 	}
@@ -605,6 +630,15 @@ func (s *Server) afterAgentJob(ctx context.Context, j runningJob, f pipeline.Fin
 	}
 }
 
+// mergeRequestOfRun is the merge request whose discussion an agent run
+// answered in, if any.
+func (s *Server) mergeRequestOfRun(ctx context.Context, channelID *string) (MergeRequest, error) {
+	if channelID == nil {
+		return MergeRequest{}, errNotFound
+	}
+	return s.mergeRequestForChannel(ctx, Channel{ID: *channelID, Kind: "merge_request"})
+}
+
 func plural(n int, one, many string) string {
 	if n == 1 {
 		return one
@@ -612,46 +646,50 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-// pushAgentBranch applies a branch proposal: it commits the job's changes on
-// top of the commit the job started from and creates the branch, as the
-// person confirming, then treats it as their push.
-func (s *Server) pushAgentBranch(ctx context.Context, u User, def agent.Definition, p ProposalView, run RunView) (*Entity, error) {
+// agentCommit commits an agent job's changes on top of the commit the job
+// started from, as the person confirming, without moving any branch. It
+// returns the commit and the agent's summary of the change.
+func (s *Server) agentCommit(ctx context.Context, u User, def agent.Definition, p ProposalView, run RunView) (Repo, string, string, error) {
 	role, err := s.Access.AppRole(ctx, u.ID, p.Input.App)
 	if err != nil {
-		return nil, err
+		return Repo{}, "", "", err
 	}
 	if !def.AllowsApp(p.Input.App) || access.Min(role, access.ParseRole(def.Role)) < access.Developer {
-		return nil, errStatus(http.StatusForbidden, fmt.Sprintf("pushing a branch needs the developer role for both you and @%s", def.Name))
+		return Repo{}, "", "", errStatus(http.StatusForbidden, fmt.Sprintf("pushing changes needs the developer role for both you and @%s", def.Name))
 	}
-	rows, err := s.DB.Query(ctx, `select `+repoCols+` from repositories r where r.app_key = $1 and r.name = $2`, p.Input.App, p.Input.Repo)
+	repo, err := s.repoByName(ctx, p.Input.App, p.Input.Repo)
 	if err != nil {
-		return nil, err
+		return Repo{}, "", "", err
 	}
-	repos, err := scanRepos(rows)
-	if err != nil {
-		return nil, err
-	}
-	if len(repos) == 0 {
-		return nil, errNotFound
-	}
-	repo := repos[0]
 	var patch []byte
 	var number int
 	if err := s.DB.QueryRow(ctx, `select coalesce(j.patch, ''), p.number from jobs j join pipelines p on p.id = j.pipeline_id where j.id = $1`, p.Input.JobID).Scan(&patch, &number); err != nil {
-		return nil, err
+		return Repo{}, "", "", err
 	}
 	var summary string
 	s.DB.QueryRow(ctx, `select coalesce(m.body, '') from agent_runs r left join messages m on m.id = r.reply_message_id where r.id = $1`, run.ID).Scan(&summary)
+	summary = strings.TrimSpace(summary)
 	title := firstLine(summary)
 	if title == "" || len(title) > 72 {
 		title = fmt.Sprintf("Changes by @%s", def.Name)
 	}
-	message := fmt.Sprintf("%s\n\n%s\n\nMade by @%s in %s/%s pipeline #%d for @%s.\n", title, strings.TrimSpace(summary), def.Name, repo.AppKey, repo.Name, number, u.Username)
+	message := fmt.Sprintf("%s\n\n%s\n\nMade by @%s in %s/%s pipeline #%d for @%s.\n", title, summary, def.Name, repo.AppKey, repo.Name, number, u.Username)
 	sha, err := s.Git.CommitPatch(ctx, repo.AppKey, repo.Name, p.Input.Base, patch, message,
 		gitrepo.Person{Name: def.DisplayName, Email: def.Name + "@agents.orbit.invalid"},
 		gitrepo.Person{Name: u.DisplayName, Email: u.Username + "@users.orbit.invalid"})
 	if err != nil {
-		return nil, errStatus(http.StatusConflict, err.Error())
+		return Repo{}, "", "", errStatus(http.StatusConflict, err.Error())
+	}
+	return repo, sha, summary, nil
+}
+
+// pushAgentBranch applies a branch proposal: it creates the branch with the
+// job's changes, as the person confirming, treats it as their push, and
+// opens a merge request for it.
+func (s *Server) pushAgentBranch(ctx context.Context, u User, def agent.Definition, p ProposalView, run RunView) (*Entity, error) {
+	repo, sha, summary, err := s.agentCommit(ctx, u, def, p, run)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.Git.CreateBranch(ctx, repo.AppKey, repo.Name, p.Input.Branch, sha); err != nil {
 		if errors.Is(err, gitrepo.ErrBranchExists) {
@@ -660,7 +698,51 @@ func (s *Server) pushAgentBranch(ctx context.Context, u User, def agent.Definiti
 		return nil, err
 	}
 	s.onPush(ctx, repo, u, p.Input.Branch, strings.Repeat("0", 40), sha)
-	e, err := s.resolve(ctx, Ref{Type: "branch", ID: repo.AppKey + "/" + repo.Name + ":" + p.Input.Branch})
+	branch, err := s.resolve(ctx, Ref{Type: "branch", ID: repo.AppKey + "/" + repo.Name + ":" + p.Input.Branch})
+	if err != nil || p.Input.Target == "" {
+		return &branch, err
+	}
+	title := firstLine(summary)
+	if title == "" || len(title) > 72 {
+		title = fmt.Sprintf("Changes by @%s", def.Name)
+	}
+	body := fmt.Sprintf("%s\n\nMade by @%s for @%s.", summary, def.Name, u.Username)
+	mr, err := s.openMergeRequest(ctx, u, repo, MergeRequestInput{SourceBranch: p.Input.Branch, TargetBranch: p.Input.Target, Title: title, Body: body})
+	if err != nil {
+		// The branch is pushed either way; the person can open one by hand.
+		slog.Error("open merge request for agent branch", "branch", p.Input.Branch, "err", err)
+		return &branch, nil
+	}
+	if run.TriggerID != nil {
+		addLink(ctx, s.DB, mr.Ref(), Ref{Type: "message", ID: *run.TriggerID}, LinkCreatedFrom, nil, u.ID)
+	}
+	e, err := s.resolve(ctx, mr.Ref())
+	return &e, err
+}
+
+// pushToMergeRequest applies a merge_request_push proposal: the job's
+// changes go on top of the merge request's source branch, if nobody pushed
+// to it since the job started.
+func (s *Server) pushToMergeRequest(ctx context.Context, u User, def agent.Definition, p ProposalView, run RunView) (*Entity, error) {
+	mr, err := s.mergeRequestByNumber(ctx, p.Input.App, p.Input.Number)
+	if err != nil {
+		return nil, err
+	}
+	if mr.Status != "open" || mr.SourceBranch != p.Input.Branch {
+		return nil, errStatus(http.StatusConflict, "the merge request is "+mr.Status)
+	}
+	repo, sha, _, err := s.agentCommit(ctx, u, def, p, run)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Git.MoveBranch(ctx, repo.AppKey, repo.Name, mr.SourceBranch, sha, p.Input.Base); err != nil {
+		if errors.Is(err, gitrepo.ErrRefMoved) {
+			return nil, errStatus(http.StatusConflict, mr.SourceBranch+" changed since the job started; ask again to work on the new version")
+		}
+		return nil, err
+	}
+	s.onPush(ctx, repo, u, mr.SourceBranch, p.Input.Base, sha)
+	e, err := s.resolve(ctx, mr.Ref())
 	return &e, err
 }
 

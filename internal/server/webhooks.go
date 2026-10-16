@@ -23,12 +23,13 @@ import (
 )
 
 // Webhooks tell other systems what happened in an application: pushes (so
-// an external CI can start a build), check updates and finished pipelines.
+// an external CI can start a build), check updates, finished pipelines and
+// merge requests opened, updated, reviewed, merged, closed or reopened.
 // Each payload is signed with the hook's secret:
 //
 //	X-Orbit-Signature: sha256=<hex HMAC-SHA256 of the body>
 
-var webhookEvents = []string{"push", "check", "pipeline"}
+var webhookEvents = []string{"push", "check", "pipeline", "merge_request"}
 
 // Webhook is a hook as listed. The secret is only shown when it is created.
 type Webhook struct {

@@ -20,7 +20,7 @@ type SearchResult struct {
 
 const maxSearchResults = 30
 
-// search finds applications, issues and messages the user can see, using
+// search finds applications, issues, merge requests and messages the user can see, using
 // Postgres full-text search. Embeddings can come later behind the same API.
 func (s *Server) search(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
@@ -73,6 +73,15 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) error {
 		  from issues i, websearch_to_tsquery('english', $1) query
 		 where to_tsvector('english', i.title || ' ' || i.body) @@ query
 		   and ($2::text is null or i.app_key = $2)
+		 order by 4 desc limit $3`, q, appArg, maxSearchResults); err != nil {
+		return err
+	}
+	if err := collect(`
+		select 'merge_request', mr.id::text, ts_headline('english', mr.title || ' ' || mr.body, query, `+headline+`),
+		       ts_rank(to_tsvector('english', mr.title || ' ' || mr.body), query)
+		  from merge_requests mr, websearch_to_tsquery('english', $1) query
+		 where to_tsvector('english', mr.title || ' ' || mr.body) @@ query
+		   and ($2::text is null or mr.app_key = $2)
 		 order by 4 desc limit $3`, q, appArg, maxSearchResults); err != nil {
 		return err
 	}

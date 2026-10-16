@@ -172,6 +172,15 @@ func (s *Server) userRoutes(r chi.Router) {
 	r.Post("/me/tokens", s.handle(s.createToken))
 	r.Delete("/me/tokens/{tokenID}", s.handle(s.deleteToken))
 
+	r.Get("/apps/{app}/merge-requests", s.handle(s.listMergeRequests))
+	r.Post("/apps/{app}/merge-requests", s.handle(s.createMergeRequest))
+	r.Get("/apps/{app}/merge-requests/{number}", s.handle(s.getMergeRequest))
+	r.Patch("/apps/{app}/merge-requests/{number}", s.handle(s.updateMergeRequest))
+	r.Get("/apps/{app}/merge-requests/{number}/diff", s.handle(s.mergeRequestDiff))
+	r.Get("/apps/{app}/merge-requests/{number}/commits", s.handle(s.mergeRequestCommits))
+	r.Post("/apps/{app}/merge-requests/{number}/reviews", s.handle(s.reviewMergeRequest))
+	r.Post("/apps/{app}/merge-requests/{number}/merge", s.handle(s.mergeMergeRequest))
+
 	r.Get("/apps/{app}/issues", s.handle(s.listIssues))
 	r.Post("/apps/{app}/issues", s.handle(s.createIssue))
 	r.Get("/apps/{app}/issues/{number}", s.handle(s.getIssue))

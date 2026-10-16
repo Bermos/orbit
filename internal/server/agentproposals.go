@@ -26,9 +26,12 @@ type ProposalInput struct {
 	Number int    `json:"number,omitempty"` // issue number, for comments
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
-	// Branch proposals: push an agent job's changes as a new branch.
+	// Branch proposals: push an agent job's changes as a new branch and open
+	// a merge request into Target, or (merge_request_push) add them to the
+	// merge request with Number, whose source branch is Branch.
 	Repo   string `json:"repo,omitempty"`
 	Branch string `json:"branch,omitempty"`
+	Target string `json:"target,omitempty"`
 	Base   string `json:"base,omitempty"`
 	JobID  string `json:"job_id,omitempty"`
 }
@@ -37,7 +40,7 @@ type ProposalInput struct {
 type ProposalView struct {
 	ID        string        `json:"id"`
 	RunID     string        `json:"run_id"`
-	Kind      string        `json:"kind"` // "issue", "todo", "issue_comment" or "branch"
+	Kind      string        `json:"kind"` // "issue", "todo", "issue_comment", "branch" or "merge_request_push"
 	Status    string        `json:"status"`
 	Summary   string        `json:"summary"`
 	Input     ProposalInput `json:"input"`
@@ -55,7 +58,12 @@ func proposalSummary(kind string, in ProposalInput) string {
 	case "issue_comment":
 		return fmt.Sprintf("Comment on %s#%d", in.App, in.Number)
 	case "branch":
+		if in.Target != "" {
+			return fmt.Sprintf("Push branch %s to %s/%s and open a merge request into %s (%s)", in.Branch, in.App, in.Repo, in.Target, in.Title)
+		}
 		return fmt.Sprintf("Push branch %s to %s/%s (%s)", in.Branch, in.App, in.Repo, in.Title)
+	case "merge_request_push":
+		return fmt.Sprintf("Push to %s, merge request %s!%d (%s)", in.Branch, in.App, in.Number, in.Title)
 	}
 	return kind
 }
@@ -206,6 +214,8 @@ func (s *Server) performProposal(r *http.Request, p ProposalView, run RunView) (
 		return &e, err
 	case "branch":
 		return s.pushAgentBranch(ctx, u, def, p, run)
+	case "merge_request_push":
+		return s.pushToMergeRequest(ctx, u, def, p, run)
 	case "issue_comment":
 		var issue struct {
 			Issue Issue `json:"issue"`

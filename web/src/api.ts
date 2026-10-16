@@ -52,7 +52,7 @@ export interface Repo {
 export interface Channel {
   id: string
   app_key: string | null
-  kind: 'chat' | 'issue' | 'direct'
+  kind: 'chat' | 'issue' | 'direct' | 'merge_request'
   name: string
   created_at: string
   // Set on private chats with an agent ("direct").
@@ -142,10 +142,20 @@ export interface AgentRun {
 export interface Proposal {
   id: string
   run_id: string
-  kind: 'issue' | 'todo' | 'issue_comment' | 'branch'
+  kind: 'issue' | 'todo' | 'issue_comment' | 'branch' | 'merge_request_push'
   status: 'pending' | 'applying' | 'applied' | 'dismissed'
   summary: string
-  input: { app?: string; number?: number; title?: string; body?: string; repo?: string; branch?: string; base?: string; job_id?: string }
+  input: {
+    app?: string
+    number?: number
+    title?: string
+    body?: string
+    repo?: string
+    branch?: string
+    target?: string
+    base?: string
+    job_id?: string
+  }
   asker_id: string | null
   result: Entity | null
   created_at: string
@@ -177,6 +187,77 @@ export interface Issue {
   created_at: string
   updated_at: string
 }
+export type MergeRequestStatus = 'open' | 'merged' | 'closed'
+export interface MergeRequest {
+  id: string
+  app_key: string
+  repo: string
+  repo_id: string
+  number: number
+  title: string
+  body: string
+  source_branch: string
+  target_branch: string
+  status: MergeRequestStatus
+  draft: boolean
+  author: Author | null
+  channel_id: string
+  head_sha: string
+  base_sha: string
+  merge_commit_sha: string | null
+  merged_by: Author | null
+  merged_at: string | null
+  closed_at: string | null
+  created_at: string
+  updated_at: string
+  checks_state: Commit['checks_state']
+}
+export interface Review {
+  user: Author
+  state: 'approved' | 'changes_requested'
+  head_sha: string
+  outdated: boolean
+  created_at: string
+}
+export interface MergeStatus {
+  mergeable: boolean
+  conflicts: string[]
+  overridable: string[]
+  reason?: string
+}
+export interface MergeRequestDetail {
+  merge_request: MergeRequest
+  links: LinkView[]
+  checks: Check[]
+  reviews: Review[]
+  merge_status: MergeStatus
+  permissions: { edit: boolean; review: boolean; merge: boolean; force: boolean }
+}
+export interface DiffLine {
+  kind: 'context' | 'add' | 'del'
+  old?: number
+  new?: number
+  text: string
+}
+// A comment on an earlier version whose lines did not change since.
+export interface MovedComment {
+  message_id: string
+  side: 'old' | 'new'
+  path: string
+  start: number
+  end: number
+}
+export interface DiffFile {
+  old_path: string
+  new_path: string
+  status: 'added' | 'deleted' | 'modified' | 'renamed'
+  binary: boolean
+  additions: number
+  deletions: number
+  too_large?: boolean
+  hunks: { header: string; old_start: number; new_start: number; lines: DiffLine[] }[]
+}
+
 export interface LinkView {
   id: string
   kind: string
@@ -286,7 +367,7 @@ export interface Runner {
   last_seen_at: string | null
   created_at: string
 }
-export type WebhookEvent = 'push' | 'check' | 'pipeline'
+export type WebhookEvent = 'push' | 'check' | 'pipeline' | 'merge_request'
 export interface Webhook {
   id: string
   app_key: string
@@ -462,9 +543,29 @@ export const api = {
   updateIssue: (app: string, n: number, patch: Partial<{ title: string; body: string; status: IssueStatus; assignee_id: string }>) =>
     request<{ issue: Issue; links: LinkView[] }>('PATCH', `/apps/${app}/issues/${n}`, patch),
 
+  mergeRequests: (app: string, status = 'open', repo?: string) =>
+    request<MergeRequest[]>('GET', `/apps/${app}/merge-requests${q({ status, repo })}`),
+  mergeRequest: (app: string, n: number) => request<MergeRequestDetail>('GET', `/apps/${app}/merge-requests/${n}`),
+  createMergeRequest: (
+    app: string,
+    input: { repo: string; source_branch: string; target_branch?: string; title?: string; body?: string; draft?: boolean },
+  ) => request<MergeRequestDetail>('POST', `/apps/${app}/merge-requests`, input),
+  updateMergeRequest: (
+    app: string,
+    n: number,
+    patch: Partial<{ title: string; body: string; draft: boolean; status: 'open' | 'closed' }>,
+  ) => request<MergeRequestDetail>('PATCH', `/apps/${app}/merge-requests/${n}`, patch),
+  mergeRequestDiff: (app: string, n: number) =>
+    request<{ base: string; head: string; files: DiffFile[]; moved: MovedComment[] }>('GET', `/apps/${app}/merge-requests/${n}/diff`),
+  mergeRequestCommits: (app: string, n: number) => request<Commit[]>('GET', `/apps/${app}/merge-requests/${n}/commits`),
+  reviewMergeRequest: (app: string, n: number, state: Review['state'] | '', body?: string) =>
+    request<MergeRequestDetail>('POST', `/apps/${app}/merge-requests/${n}/reviews`, { state, body }),
+  mergeMergeRequest: (app: string, n: number, input: { strategy: 'merge' | 'squash'; delete_source_branch: boolean; force?: boolean }) =>
+    request<MergeRequestDetail>('POST', `/apps/${app}/merge-requests/${n}/merge`, input),
+
   channels: (app?: string) => request<Channel[]>('GET', `/channels${q({ app })}`),
   createChannel: (name: string, app_key: string | null) => request<Channel>('POST', '/channels', { name, app_key }),
-  channel: (id: string) => request<{ channel: Channel; issue_url?: string }>('GET', `/channels/${id}`),
+  channel: (id: string) => request<{ channel: Channel; issue_url?: string; merge_request_url?: string }>('GET', `/channels/${id}`),
   messages: (channel: string, thread?: string) => request<Message[]>('GET', `/channels/${channel}/messages${q({ thread })}`),
   postMessage: (channel: string, input: { body: string; thread_id?: string | null; code?: CodeInput; private?: boolean }) =>
     request<Message>('POST', `/channels/${channel}/messages`, input),

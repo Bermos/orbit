@@ -392,6 +392,11 @@ func (s *Server) agentPrompt(ctx context.Context, def agent.Definition, asker Us
 		}
 		where = fmt.Sprintf("the discussion of issue %s#%d %q (application %s, issue number %d)", app, number, title, app, number)
 	}
+	if mr, err := s.mergeRequestForChannel(ctx, ch); err == nil {
+		where = fmt.Sprintf("the review discussion of merge request %s %q (application %s, number %d), which merges branch %s into %s of repository %s/%s and is %s. "+
+			"Comments on the diff carry the code range they discuss; get_merge_request shows the changes",
+			mr.reference(), mr.Title, mr.AppKey, mr.Number, mr.SourceBranch, mr.TargetBranch, mr.AppKey, mr.Repo, mr.Status)
+	}
 
 	var b strings.Builder
 	b.WriteString(def.Instructions)

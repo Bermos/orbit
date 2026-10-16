@@ -7,7 +7,9 @@ import ProposalCard from './ProposalCard.vue'
 import StatusDot from './StatusDot.vue'
 
 // privateChat drops the "only you" marking: everything in a private chat is.
-defineProps<{ message: Message; inThread?: boolean; privateChat?: boolean }>()
+// hideCode leaves out the code a message discusses, where it is shown next
+// to the code already (inline comments on a diff).
+defineProps<{ message: Message; inThread?: boolean; privateChat?: boolean; hideCode?: boolean }>()
 const emit = defineEmits<{ reply: []; todo: []; issue: []; links: [] }>()
 
 function time(s: string) {
@@ -29,7 +31,9 @@ function time(s: string) {
       </div>
       <div v-if="message.body" class="body">{{ message.body }}</div>
       <template v-for="(a, i) in message.attachments" :key="i">
-        <CodeSnippet v-if="a.type === 'code'" :code="a.code" :lines="a.lines" :url="a.url" />
+        <template v-if="a.type === 'code'">
+          <CodeSnippet v-if="!hideCode" :code="a.code" :lines="a.lines" :url="a.url" />
+        </template>
         <div v-else-if="a.type === 'entity'" class="entity">
           <EntityChip :entity="a.entity" />
           <blockquote v-if="a.quote">{{ a.quote }}</blockquote>

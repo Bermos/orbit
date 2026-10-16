@@ -418,11 +418,16 @@ func TestAgentJobFromChatProposesABranch(t *testing.T) {
 		t.Errorf("patch without sign-in: %d", patch.StatusCode)
 	}
 
-	// Only the asker pushes the branch; it runs the branch's pipeline.
+	// Only the asker pushes the branch; it runs the branch's pipeline and
+	// gets a merge request into the branch the job started from.
 	reader.do("POST", "/agent-proposals/"+proposal["id"].(string)+"/apply", nil, 403)
 	applied := f.admin.do("POST", "/agent-proposals/"+proposal["id"].(string)+"/apply", nil, 200)
-	if get(applied, "result", "type") != "branch" || get(applied, "result", "title") != "agent/coder-2" {
+	if get(applied, "result", "type") != "merge_request" || get(applied, "result", "subtitle") != "ledger!1 · open" {
 		t.Fatalf("applied = %v", applied)
+	}
+	mr := f.admin.do("GET", "/apps/ledger/merge-requests/1", nil, 200)
+	if get(mr, "merge_request", "source_branch") != "agent/coder-2" || get(mr, "merge_request", "target_branch") != "main" {
+		t.Fatalf("merge request = %v", mr["merge_request"])
 	}
 	blob := f.admin.do("GET", "/apps/ledger/repos/api/blob?ref=agent/coder-2&path=NOTES.md", nil, 200)
 	if blob["content"] != "hello from the agent\n" {

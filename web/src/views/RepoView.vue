@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api, type Commit, type RepoDetail, type TreeEntry } from '../api'
 import CommitList from '../components/CommitList.vue'
 import DiscussCodeDialog from '../components/DiscussCodeDialog.vue'
+import NewMergeRequestDialog from '../components/NewMergeRequestDialog.vue'
 import RepoHeader from '../components/RepoHeader.vue'
 import { useToasts } from '../stores/toast'
 import { useTodos } from '../stores/todos'
@@ -24,9 +25,14 @@ const error = ref('')
 const selStart = ref<number | null>(null)
 const selEnd = ref<number | null>(null)
 const discussing = ref(false)
+const openingMR = ref(false)
 
 const showCommits = computed(() => props.mode === 'tree' && route.query.tab === 'commits')
 const ref_ = computed(() => props.gitRef || detail.value?.repository.default_branch || 'main')
+// Viewing a branch other than the default one offers to open a merge request.
+const featureBranch = computed(
+  () => detail.value && ref_.value !== detail.value.repository.default_branch && detail.value.branches.some((b) => b.name === ref_.value),
+)
 const lines = computed(() => {
   if (content.value === null) return []
   const ls = content.value.split('\n')
@@ -158,6 +164,7 @@ git push orbit {{ detail.repository.default_branch }}</pre>
           <option v-for="b in detail.branches" :key="b.name" :value="b.name">⎇ {{ b.name }}</option>
           <option v-if="!detail.branches.some((b) => b.name === ref_)" :value="ref_">{{ ref_.slice(0, 12) }}</option>
         </select>
+        <button v-if="featureBranch" class="small" @click="openingMR = true">⇄ New merge request</button>
         <div v-if="!showCommits" class="path mono">
           <RouterLink :to="treeLink('')">{{ repo }}</RouterLink>
           <template v-for="(c, i) in crumbs" :key="c.path">
@@ -226,6 +233,7 @@ git push orbit {{ detail.repository.default_branch }}</pre>
       <button class="small" @click="copyLink">Copy permalink</button>
       <button class="ghost small" aria-label="Clear selection" @click="clearSelection">✕</button>
     </div>
+    <NewMergeRequestDialog v-if="openingMR" :app="app" :repo="repo" :source="ref_" @close="openingMR = false" />
     <DiscussCodeDialog v-if="discussing && codeInput" :code="codeInput" :lines="selectedLines" @close="discussing = false" />
   </div>
 </template>

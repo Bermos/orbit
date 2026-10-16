@@ -13,8 +13,14 @@ const toasts = useToasts()
 const busy = ref(false)
 
 const mine = computed(() => props.proposal.asker_id === session.user?.id)
-const icons = { issue: '◉', todo: '☐', issue_comment: '💬', branch: '⑂' }
-const verbs = { issue: 'Create issue', todo: 'Add to-do', issue_comment: 'Post comment', branch: 'Push branch' }
+const icons = { issue: '◉', todo: '☐', issue_comment: '💬', branch: '⑂', merge_request_push: '⇄' }
+const verbs = computed(() => ({
+  issue: 'Create issue',
+  todo: 'Add to-do',
+  issue_comment: 'Post comment',
+  branch: props.proposal.input.target ? 'Push and open merge request' : 'Push branch',
+  merge_request_push: 'Push to merge request',
+}))
 
 async function act(apply: boolean) {
   busy.value = true
