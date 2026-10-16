@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -34,12 +35,26 @@ type Server struct {
 	Web fs.FS
 	// BaseURL is the externally visible URL, used for clone URLs.
 	BaseURL string
+	// Registration says who may create an account: RegistrationInvite (the
+	// default) or RegistrationOpen.
+	Registration string
+	// SetupToken, if set, must be given to create the first account (the
+	// instance admin), so a fresh instance cannot be claimed by whoever
+	// finds it first.
+	SetupToken string
+	// TrustProxyHeaders takes client addresses from X-Real-IP or
+	// X-Forwarded-For. Set it only behind a reverse proxy that sets them.
+	TrustProxyHeaders bool
+	// WebhookAllowedNetworks are private networks webhooks may still reach.
+	// Everything else that is not on the public internet is refused.
+	WebhookAllowedNetworks []netip.Prefix
 
 	agents *agentService
 	ci     *ciService
 	// background tracks goroutines such as webhook deliveries.
 	background    sync.WaitGroup
 	webhookClient *http.Client
+	limits        limits
 	// internal serves the authenticated API in-process, so agent tools and
 	// confirmed proposals go through exactly the checks people go through.
 	internal http.Handler
@@ -48,19 +63,17 @@ type Server struct {
 // New creates a Server.
 func New(db *pgxpool.Pool, git gitrepo.Store, web fs.FS, baseURL string) *Server {
 	s := &Server{
-		DB:      db,
-		Git:     git,
-		Hub:     realtime.NewHub(),
-		Access:  access.Resolver{DB: db},
-		Web:     web,
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		ci:      newCI(),
-		webhookClient: &http.Client{
-			Timeout: 10 * time.Second,
-			// A hook gets exactly the URL it was given.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		DB:           db,
+		Git:          git,
+		Hub:          realtime.NewHub(),
+		Access:       access.Resolver{DB: db},
+		Web:          web,
+		BaseURL:      strings.TrimRight(baseURL, "/"),
+		Registration: RegistrationInvite,
+		ci:           newCI(),
+		limits:       newLimits(),
 	}
+	s.webhookClient = s.newOutboundClient()
 	internal := chi.NewRouter()
 	internal.Route("/api/v1", s.userRoutes)
 	s.internal = internal
@@ -70,7 +83,7 @@ func New(db *pgxpool.Pool, git gitrepo.Store, web fs.FS, baseURL string) *Server
 // Routes builds the HTTP handler.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer)
+	r.Use(middleware.RequestID, s.realIP, middleware.Recoverer, s.securityHeaders)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +99,7 @@ func (s *Server) Routes() http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(middleware.Timeout(30 * time.Second))
+		r.Get("/auth/config", s.handle(s.authConfig))
 		r.Post("/auth/register", s.handle(s.register))
 		r.Post("/auth/login", s.handle(s.login))
 
@@ -111,6 +125,10 @@ func (s *Server) userRoutes(r chi.Router) {
 	r.Get("/me", s.handle(s.me))
 	r.Get("/me/teams", s.handle(s.myTeams))
 	r.Get("/users", s.handle(s.listUsers))
+
+	r.Get("/invites", s.handle(s.listInvites))
+	r.Post("/invites", s.handle(s.createInvite))
+	r.Delete("/invites/{inviteID}", s.handle(s.deleteInvite))
 
 	r.Get("/teams", s.handle(s.listTeams))
 	r.Post("/teams", s.handle(s.createTeam))

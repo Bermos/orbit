@@ -11,7 +11,7 @@ Orbit is a self-hosted platform where code, chat, issues, planning, reviews and 
 
 ## What works today
 
-- Local accounts (the first account becomes the instance admin)
+- Local accounts, invite-only by default: the instance admin is created with a one-time setup link or from the environment, and invites people with single-use links
 - Teams and sub-teams, members and leads, and renaming or moving teams
 - Applications with a short name (URL slug and ID, immutable) and a long display name, an owning team and responsible sub-teams
 - Team spaces: one view of every application, and its open issues, that a team or its sub-teams own or are responsible for
@@ -35,7 +35,7 @@ With Docker:
 docker compose up --build
 ```
 
-Then open http://localhost:8080 and create an account.
+Then open the setup link Orbit logs on first start (`docker compose logs orbit | grep setup`) to create the instance admin.
 
 For development you need Go 1.26+, Node 22+, git, and a PostgreSQL 16 database:
 
@@ -60,9 +60,26 @@ To serve the UI from the Go binary, run `npm run build` in `web/` before `go bui
 | `ORBIT_BASE_URL` | `http://localhost:8080` | External URL, used for clone URLs and secure cookies |
 | `ORBIT_AGENTS_DIR` | | Directory of agent definition files (`*.md`) added to the built-in agents |
 | `ANTHROPIC_API_KEY` | | Key for agents whose model is `anthropic/...`. Without it they answer with a built-in test model |
-| `ORBIT_EMBEDDED_RUNNER` | | `local` runs a CI runner inside the server, executing jobs as unisolated processes. For development only |
+| `ORBIT_EMBEDDED_RUNNER` | | `local` runs a CI runner inside the server, executing jobs as unisolated processes. For development only: refused unless `ORBIT_BASE_URL` is localhost |
+| `ORBIT_REGISTRATION` | `invite` | Who may create an account: `invite` (people with an invite link from an admin) or `open` (anyone who can reach Orbit) |
+| `ORBIT_ADMIN_USERNAME`, `ORBIT_ADMIN_PASSWORD` | | Create the instance admin on startup if there are no accounts yet. Never changes an existing account |
+| `ORBIT_SETUP_TOKEN` | random | Token for the setup link that creates the first account, when no admin is configured. Set it when running several replicas |
+| `ORBIT_TRUST_PROXY_HEADERS` | `false` | `true` behind a reverse proxy that sets `X-Real-IP` or `X-Forwarded-For`, so rate limits see the real client |
+| `ORBIT_WEBHOOK_ALLOWED_NETWORKS` | | Comma-separated CIDRs webhooks may reach although they are private, for example `10.0.20.0/24`. Without it webhooks only reach the public internet |
 
 Migrations run automatically on startup.
+
+### Running Orbit on the internet
+
+Orbit is built to be reachable from the internet, with these defaults:
+
+- **Nobody signs up uninvited.** Registration is invite-only. A fresh instance prints a one-time setup link to its log; whoever opens it creates the admin. Or set `ORBIT_ADMIN_USERNAME` and `ORBIT_ADMIN_PASSWORD`. Admins create invite links under Settings; each works once and expires after 7 days.
+- **Guessing is slow.** Failed sign-ins (web, API and git) are limited per client address and per username, and account creation per address. Limits are kept in memory per replica. Behind a reverse proxy, set `ORBIT_TRUST_PROXY_HEADERS=true`, otherwise every client looks like the proxy.
+- **Webhooks stay outside.** Orbit refuses to send webhooks to loopback, private, link-local and carrier-grade NAT addresses, checked after DNS when connecting. Allow internal targets with `ORBIT_WEBHOOK_ALLOWED_NETWORKS`.
+- **CI jobs are contained.** Use the Kubernetes runner; the embedded runner only starts for a localhost URL. The runner manifest's NetworkPolicy keeps job pods away from the cluster and private networks, and jobs get CPU and memory limits by default.
+- **Serve it over HTTPS** and set `ORBIT_BASE_URL` to the `https://` URL: cookies are then marked secure and browsers are told to use HTTPS only (HSTS). Responses carry a strict Content Security Policy and may not be framed.
+
+Every signed-in person can read every application (internal visibility), and agents spend the instance's model credits for whoever asks them, so invite people you trust with that.
 
 ## Agents
 
@@ -144,7 +161,7 @@ Runners pull jobs from Orbit over HTTPS, so they need no inbound access and can 
 | `ORBIT_RUNNER_CONCURRENCY` | `2` | Jobs run at once |
 | `ORBIT_RUNNER_NAMESPACE` | the runner's own | Namespace for job pods |
 | `ORBIT_RUNNER_RUNTIME_CLASS` | | `runtimeClassName` for job pods, for example `gvisor` |
-| `ORBIT_RUNNER_CPU_LIMIT`, `ORBIT_RUNNER_MEMORY_LIMIT` | | Limits for the job container |
+| `ORBIT_RUNNER_CPU_LIMIT`, `ORBIT_RUNNER_MEMORY_LIMIT` | `2`, `4Gi` | Limits for the job container; `none` for no limit |
 | `ORBIT_RUNNER_AGENT_IMAGE` | `golang:1.26` | Image for agent jobs whose agent names none (it needs `sh`) |
 | `ORBIT_RUNNER_GIT_IMAGE` | `alpine/git:2.54.0` | Image that clones repositories |
 
@@ -179,7 +196,7 @@ The repository is the one named as `app/repo` (optionally `@branch`), otherwise 
 - **Nothing is pushed without a person.** The runner hands back the changes as a diff. The reply offers to push them as a branch (`agent/<agent>-<pipeline>`); only the person who asked can confirm, which needs the developer role for both them and the agent. The commit is authored by the agent and committed by that person, and the new branch runs its pipeline like any push.
 - **Bounded.** Jobs time out (30 minutes by default), and `max_steps` and `budget_tokens` in the agent's definition cap model calls and tokens.
 
-Agent pods carry the label `orbit.dev/kind=agent`, so a NetworkPolicy can restrict their egress; the runner manifest includes an example.
+Job pods carry the label `app.kubernetes.io/managed-by=orbit-runner` and agent pods also `orbit.dev/kind=agent`. The runner manifest ships two NetworkPolicies: CI jobs reach Orbit, DNS and the public internet but not the cluster or private networks; agent jobs reach only Orbit and DNS.
 
 Not yet: pausing a job to ask a person a question, merge requests for agent branches, artifacts and caches, secrets for jobs, retrying failed webhook deliveries, and an importer for `.gitlab-ci.yml`.
 

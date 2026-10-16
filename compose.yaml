@@ -1,5 +1,5 @@
-# Local development stack: `docker compose up --build`, then open
-# http://localhost:8080 and create the first account (it becomes admin).
+# Local development stack: `docker compose up --build`, then open the setup
+# link in `docker compose logs orbit` to create the admin account.
 services:
   postgres:
     image: postgres:16-alpine

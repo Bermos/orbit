@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -108,6 +109,11 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) error {
 	u, err := url.Parse(strings.TrimSpace(in.URL))
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return badRequest("url must be an http or https URL")
+	}
+	// Addresses are checked when connecting, after DNS; a literal address
+	// can be refused right away.
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !outboundAllowed(ip, s.WebhookAllowedNetworks) {
+		return badRequest("webhooks cannot target private or local addresses")
 	}
 	if len(in.Events) == 0 {
 		in.Events = webhookEvents

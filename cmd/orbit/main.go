@@ -3,14 +3,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -68,6 +72,9 @@ func run() error {
 		slog.Warn("web UI not built; serving the API only (run `npm run build` in web/)")
 	}
 	srv := server.New(pool, gitrepo.Store{Root: repoRoot}, ui, baseURL)
+	if err := configureAccess(ctx, srv); err != nil {
+		return err
+	}
 	if err := enableAgents(ctx, srv, os.Getenv("ORBIT_AGENTS_DIR")); err != nil {
 		return err
 	}
@@ -138,6 +145,9 @@ func startEmbeddedRunner(ctx context.Context, srv *server.Server, executor, addr
 	default:
 		return fmt.Errorf("ORBIT_EMBEDDED_RUNNER must be local, not %q", executor)
 	}
+	if !isLocalURL(srv.BaseURL) {
+		return fmt.Errorf("ORBIT_EMBEDDED_RUNNER runs jobs unisolated on this machine and is only allowed when ORBIT_BASE_URL is localhost, not %s; register a Kubernetes runner instead", srv.BaseURL)
+	}
 	token, err := srv.RegisterEmbeddedRunner(ctx)
 	if err != nil {
 		return err
@@ -157,4 +167,70 @@ func startEmbeddedRunner(ctx context.Context, srv *server.Server, executor, addr
 		Version:  "embedded",
 	})
 	return nil
+}
+
+// configureAccess applies the settings for who may sign up and how Orbit
+// treats its network, and makes sure a fresh instance has a way to get its
+// first admin that a stranger cannot use.
+func configureAccess(ctx context.Context, srv *server.Server) error {
+	switch reg := env("ORBIT_REGISTRATION", server.RegistrationInvite); reg {
+	case server.RegistrationInvite, server.RegistrationOpen:
+		srv.Registration = reg
+	default:
+		return fmt.Errorf("ORBIT_REGISTRATION must be invite or open, not %q", reg)
+	}
+	if srv.Registration == server.RegistrationOpen && !isLocalURL(srv.BaseURL) {
+		slog.Warn("ORBIT_REGISTRATION=open: anyone who can reach Orbit can create an account and run CI jobs")
+	}
+	srv.TrustProxyHeaders = os.Getenv("ORBIT_TRUST_PROXY_HEADERS") == "true"
+	nets, err := server.ParseNetworks(os.Getenv("ORBIT_WEBHOOK_ALLOWED_NETWORKS"))
+	if err != nil {
+		return fmt.Errorf("ORBIT_WEBHOOK_ALLOWED_NETWORKS: %w", err)
+	}
+	srv.WebhookAllowedNetworks = nets
+	if !strings.HasPrefix(srv.BaseURL, "https://") && !isLocalURL(srv.BaseURL) {
+		slog.Warn("ORBIT_BASE_URL is not https: passwords and session cookies travel unencrypted", "base_url", srv.BaseURL)
+	}
+
+	if user, pass := os.Getenv("ORBIT_ADMIN_USERNAME"), os.Getenv("ORBIT_ADMIN_PASSWORD"); user != "" || pass != "" {
+		if user == "" || pass == "" {
+			return errors.New("set both ORBIT_ADMIN_USERNAME and ORBIT_ADMIN_PASSWORD, or neither")
+		}
+		created, err := srv.EnsureAdmin(ctx, user, pass)
+		if err != nil {
+			return fmt.Errorf("create admin %q: %w", user, err)
+		}
+		if created {
+			slog.Info("created the instance admin", "username", user)
+		}
+	}
+	setup, err := srv.NeedsSetup(ctx)
+	if err != nil || !setup {
+		return err
+	}
+	token := os.Getenv("ORBIT_SETUP_TOKEN")
+	if token == "" {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		token = hex.EncodeToString(b)
+	}
+	srv.SetupToken = token
+	slog.Warn("no accounts yet: open this link to create the instance admin", "url", srv.BaseURL+"/login?setup="+token)
+	return nil
+}
+
+// isLocalURL reports whether u points at this machine only.
+func isLocalURL(u string) bool {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

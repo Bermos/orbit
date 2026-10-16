@@ -82,8 +82,50 @@ spec:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { memory: 256Mi }
 ---
-# Example: agent jobs may only reach Orbit (to clone) and DNS. Needs a CNI
-# that enforces NetworkPolicy; adjust the Orbit selector to your install.
+# CI jobs run code from anyone who can push. They may reach Orbit (to clone),
+# DNS and the public internet (to download dependencies), but not the cluster
+# or your private networks: no Kubernetes API, no other services, no router or
+# NAS. Needs a CNI that enforces NetworkPolicy; adjust the Orbit selector and
+# add your cluster's pod and service CIDRs if they are not in the ranges below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orbit-ci-jobs
+  namespace: orbit-ci
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/managed-by: orbit-runner }
+    matchExpressions:
+      - { key: orbit.dev/kind, operator: NotIn, values: [agent] }
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: orbit } }
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10
+              - ::1/128
+---
+# Agent jobs get less: only Orbit (to clone) and DNS. Policies add up, so
+# agent pods are excluded from the one above.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -96,6 +138,9 @@ spec:
   egress:
     - to:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: orbit } }
-    - ports:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
