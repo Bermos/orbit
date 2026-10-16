@@ -21,6 +21,14 @@ import (
 // version is set at build time.
 var version = "dev"
 
+// limit reads a resource limit for job containers; "none" means unlimited.
+func limit(key, def string) string {
+	if v := env(key, def); v != "none" {
+		return v
+	}
+	return ""
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -67,8 +75,8 @@ func run() error {
 			Namespace:    env("ORBIT_RUNNER_NAMESPACE", namespace()),
 			GitImage:     os.Getenv("ORBIT_RUNNER_GIT_IMAGE"),
 			RuntimeClass: os.Getenv("ORBIT_RUNNER_RUNTIME_CLASS"),
-			CPU:          os.Getenv("ORBIT_RUNNER_CPU_LIMIT"),
-			Memory:       os.Getenv("ORBIT_RUNNER_MEMORY_LIMIT"),
+			CPU:          limit("ORBIT_RUNNER_CPU_LIMIT", "2"),
+			Memory:       limit("ORBIT_RUNNER_MEMORY_LIMIT", "4Gi"),
 		}
 	case "local":
 		slog.Warn("the local executor runs jobs on this machine without isolation; use it for development only")

@@ -1,24 +1,50 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { api, type AuthConfig } from '../api'
 import { useSession } from '../stores/session'
 
 const session = useSession()
 const router = useRouter()
 const route = useRoute()
-const mode = ref<'login' | 'register'>('login')
+// Links from an admin (?invite=) and from the startup log (?setup=) open the
+// sign-up form with the code filled in.
+const invite = (route.query.invite as string) || ''
+const setupToken = ref((route.query.setup as string) || '')
+const config = ref<AuthConfig | null>(null)
+const mode = ref<'login' | 'register'>(invite || setupToken.value ? 'register' : 'login')
 const username = ref('')
 const displayName = ref('')
 const password = ref('')
 const error = ref('')
 const busy = ref(false)
 
+const canRegister = computed(
+  () => !!invite || !!config.value?.setup_required || config.value?.registration === 'open',
+)
+
+onMounted(async () => {
+  try {
+    config.value = await api.authConfig()
+    if (config.value.setup_required) mode.value = 'register'
+  } catch {
+    // The sign-in form works without it.
+  }
+})
+
 async function submit() {
   busy.value = true
   error.value = ''
   try {
     if (mode.value === 'login') await session.login(username.value, password.value)
-    else await session.register(username.value, displayName.value, password.value)
+    else
+      await session.register({
+        username: username.value,
+        display_name: displayName.value,
+        password: password.value,
+        invite: invite || undefined,
+        setup_token: config.value?.setup_token_required ? setupToken.value : undefined,
+      })
     router.replace((route.query.next as string) || '/')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -39,6 +65,14 @@ async function submit() {
         <h1>Orbit</h1>
       </div>
       <p class="muted">Code, chat, issues and planning in one place.</p>
+      <p v-if="mode === 'register' && config?.setup_required" class="small">
+        Welcome! Create the first account. It becomes the instance admin.
+      </p>
+      <div v-if="mode === 'register' && config?.setup_token_required" class="field">
+        <label for="s">Setup token</label>
+        <input id="s" v-model="setupToken" class="mono" autocomplete="off" required />
+        <div class="hint">Orbit logs a setup link with this token when it starts without any accounts.</div>
+      </div>
       <div class="field">
         <label for="u">Username</label>
         <input id="u" v-model="username" autocomplete="username" required autofocus />
@@ -50,12 +84,13 @@ async function submit() {
       <div class="field">
         <label for="p">Password</label>
         <input id="p" v-model="password" type="password" :autocomplete="mode === 'login' ? 'current-password' : 'new-password'" required />
-        <div v-if="mode === 'register'" class="hint">At least 8 characters. The first account becomes the instance admin.</div>
+        <div v-if="mode === 'register'" class="hint">At least 8 characters.</div>
       </div>
       <div v-if="error" class="error">{{ error }}</div>
       <button class="primary full" type="submit" :disabled="busy">{{ mode === 'login' ? 'Sign in' : 'Create account' }}</button>
       <p class="switch muted small">
-        <template v-if="mode === 'login'">No account yet? <a href="#" @click.prevent="mode = 'register'">Create one</a></template>
+        <template v-if="mode === 'login' && canRegister">No account yet? <a href="#" @click.prevent="mode = 'register'">Create one</a></template>
+        <template v-else-if="mode === 'login'">No account yet? Ask an admin for an invite.</template>
         <template v-else>Already have an account? <a href="#" @click.prevent="mode = 'login'">Sign in</a></template>
       </p>
     </form>

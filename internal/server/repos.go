@@ -232,11 +232,19 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 		s.Git.HTTPBackend(w, r, "/"+app+"/"+name+".git/"+parts[2], pipeline.JobUser)
 		return
 	}
-	u, err := s.userByPassword(ctx, username, password)
-	if err != nil {
-		if su, serr := s.userByToken(ctx, password); serr == nil && su.Username == strings.ToLower(username) {
-			u, err = su, nil
-		}
+	var u User
+	var err error
+	// A token (access token or session) works as the password, too. Tokens
+	// are too long to guess, so only passwords count towards rate limits.
+	if su, serr := s.userByToken(ctx, password); serr == nil && su.Username == strings.ToLower(username) {
+		u = su
+	} else {
+		u, err = s.checkPassword(w, r, username, password)
+	}
+	var ae *apiError
+	if errors.As(err, &ae) && ae.status == http.StatusTooManyRequests {
+		http.Error(w, ae.msg, http.StatusTooManyRequests)
+		return
 	}
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="Orbit"`)

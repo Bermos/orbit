@@ -11,6 +11,9 @@ const router = useRouter()
 
 onMounted(() => {
   window.addEventListener('orbit:unauthorized', () => {
+    // Only a session that ended while in use; signed-out visitors are
+    // handled by the router guard, which keeps the URL they opened.
+    if (!session.user) return
     session.user = null
     router.push({ path: '/login', query: { next: route.fullPath } })
   })

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -123,18 +124,81 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u User) er
 	return nil
 }
 
+// Who may create an account.
+const (
+	// RegistrationInvite: only people with an invite from an admin.
+	RegistrationInvite = "invite"
+	// RegistrationOpen: anyone who can reach the instance.
+	RegistrationOpen = "open"
+)
+
+// authConfig tells the sign-in page which forms to offer.
+func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) error {
+	setup, err := s.NeedsSetup(r.Context())
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"registration":         s.Registration,
+		"setup_required":       setup,
+		"setup_token_required": setup && s.SetupToken != "",
+	})
+	return nil
+}
+
+// NeedsSetup reports whether the instance has no people yet.
+func (s *Server) NeedsSetup(ctx context.Context) (bool, error) {
+	var none bool
+	err := s.DB.QueryRow(ctx, `select not exists (select 1 from users where kind = 'human')`).Scan(&none)
+	return none, err
+}
+
+// EnsureAdmin creates the instance admin when there are no people yet. It
+// never changes an existing account.
+func (s *Server) EnsureAdmin(ctx context.Context, username, password string) (bool, error) {
+	if err := validPassword(password); err != nil {
+		return false, err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return false, err
+	}
+	username = strings.ToLower(strings.TrimSpace(username))
+	tag, err := s.DB.Exec(ctx, `
+		insert into users (username, display_name, password_hash, is_admin)
+		select $1, $1, $2, true where not exists (select 1 from users where kind = 'human')`, username, string(hash))
+	return tag.RowsAffected() == 1, err
+}
+
+func validPassword(p string) error {
+	if len(p) < 8 {
+		return badRequest("password must be at least 8 characters")
+	}
+	if len(p) > 72 {
+		return badRequest("password must be at most 72 bytes")
+	}
+	return nil
+}
+
 func (s *Server) register(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		Username    string `json:"username"`
 		DisplayName string `json:"display_name"`
 		Password    string `json:"password"`
+		Invite      string `json:"invite"`
+		SetupToken  string `json:"setup_token"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		return err
 	}
+	ip := remoteIP(r)
+	if err := tooManyAttempts(w, func() time.Duration { return s.limits.register.retryAfter(ip) }); err != nil {
+		return err
+	}
+	s.limits.register.add(ip)
 	in.Username = strings.ToLower(strings.TrimSpace(in.Username))
-	if len(in.Password) < 8 {
-		return badRequest("password must be at least 8 characters")
+	if err := validPassword(in.Password); err != nil {
+		return err
 	}
 	if strings.TrimSpace(in.DisplayName) == "" {
 		in.DisplayName = in.Username
@@ -143,17 +207,84 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	var u User
-	// The first account becomes the instance admin.
-	err = s.DB.QueryRow(r.Context(), `
-		insert into users (username, display_name, password_hash, is_admin)
-		values ($1, $2, $3, not exists (select 1 from users where kind = 'human'))
-		returning id, username, display_name, is_admin`,
-		in.Username, strings.TrimSpace(in.DisplayName), string(hash)).Scan(&u.ID, &u.Username, &u.DisplayName, &u.IsAdmin)
+
+	ctx := r.Context()
+	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback(ctx)
+	// One registration at a time, so two people cannot both become the
+	// first account.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('orbit.register'))`); err != nil {
+		return err
+	}
+	var first bool
+	if err := tx.QueryRow(ctx, `select not exists (select 1 from users where kind = 'human')`).Scan(&first); err != nil {
+		return err
+	}
+	var inviteID *string
+	switch {
+	case first:
+		// The first account becomes the instance admin.
+		if s.SetupToken != "" && subtle.ConstantTimeCompare([]byte(in.SetupToken), []byte(s.SetupToken)) != 1 {
+			return errStatus(http.StatusForbidden, "the setup token is missing or wrong; Orbit logs it at startup")
+		}
+	case in.Invite != "":
+		var id string
+		err := tx.QueryRow(ctx, `update invites set used_at = now() where token_hash = $1 and used_at is null and expires_at > now() returning id`,
+			hashToken(in.Invite)).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errStatus(http.StatusForbidden, "this invite is invalid, expired or already used")
+		}
+		if err != nil {
+			return err
+		}
+		inviteID = &id
+	case s.Registration == RegistrationOpen:
+	default:
+		return errStatus(http.StatusForbidden, "you need an invite to create an account; ask an admin")
+	}
+
+	var u User
+	err = tx.QueryRow(ctx, `
+		insert into users (username, display_name, password_hash, is_admin)
+		values ($1, $2, $3, $4)
+		returning id, username, display_name, is_admin`,
+		in.Username, strings.TrimSpace(in.DisplayName), string(hash), first).Scan(&u.ID, &u.Username, &u.DisplayName, &u.IsAdmin)
+	if err != nil {
+		return err
+	}
+	if inviteID != nil {
+		if _, err := tx.Exec(ctx, `update invites set used_by = $1 where id = $2`, u.ID, *inviteID); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
 	return s.startSession(w, r, u)
+}
+
+// checkPassword is userByPassword with rate limits on failures, for every
+// place a password is accepted.
+func (s *Server) checkPassword(w http.ResponseWriter, r *http.Request, username, password string) (User, error) {
+	ip, user := remoteIP(r), strings.ToLower(username)
+	if err := tooManyAttempts(w,
+		func() time.Duration { return s.limits.authIP.retryAfter(ip) },
+		func() time.Duration { return s.limits.authUser.retryAfter(user) },
+	); err != nil {
+		return User{}, err
+	}
+	u, err := s.userByPassword(r.Context(), username, password)
+	var ae *apiError
+	if errors.As(err, &ae) && ae.status == http.StatusUnauthorized {
+		s.limits.authIP.add(ip)
+		s.limits.authUser.add(user)
+	} else if err == nil {
+		s.limits.authUser.reset(user)
+	}
+	return u, err
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) error {
@@ -164,7 +295,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) error {
 	if err := readJSON(r, &in); err != nil {
 		return err
 	}
-	u, err := s.userByPassword(r.Context(), in.Username, in.Password)
+	u, err := s.checkPassword(w, r, in.Username, in.Password)
 	if err != nil {
 		return err
 	}

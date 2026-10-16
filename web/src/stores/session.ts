@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api, type User } from '../api'
+import { api, type RegisterInput, type User } from '../api'
 
 export const useSession = defineStore('session', () => {
   const user = ref<User | null>(null)
@@ -17,8 +17,8 @@ export const useSession = defineStore('session', () => {
   async function login(username: string, password: string) {
     user.value = (await api.login(username, password)).user
   }
-  async function register(username: string, displayName: string, password: string) {
-    user.value = (await api.register(username, displayName, password)).user
+  async function register(input: RegisterInput) {
+    user.value = (await api.register(input)).user
   }
   async function logout() {
     await api.logout()

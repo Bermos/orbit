@@ -307,6 +307,27 @@ export interface WebhookDelivery {
   duration_ms: number
   created_at: string
 }
+export interface AuthConfig {
+  registration: 'invite' | 'open'
+  setup_required: boolean
+  setup_token_required: boolean
+}
+export interface Invite {
+  id: string
+  note: string
+  created_at: string
+  expires_at: string
+  used_at: string | null
+  used_by: string | null
+}
+export interface RegisterInput {
+  username: string
+  display_name: string
+  password: string
+  invite?: string
+  setup_token?: string
+}
+
 export interface ApiToken {
   id: string
   name: string
@@ -358,8 +379,8 @@ const q = (params: Record<string, string | undefined>) => {
 }
 
 export const api = {
-  register: (username: string, display_name: string, password: string) =>
-    request<{ user: User }>('POST', '/auth/register', { username, display_name, password }),
+  authConfig: () => request<AuthConfig>('GET', '/auth/config'),
+  register: (input: RegisterInput) => request<{ user: User }>('POST', '/auth/register', input),
   login: (username: string, password: string) => request<{ user: User }>('POST', '/auth/login', { username, password }),
   logout: () => request<void>('POST', '/auth/logout'),
   me: () => request<User>('GET', '/me'),
@@ -428,6 +449,11 @@ export const api = {
   createToken: (name: string, expires_in_days?: number) =>
     request<{ token: ApiToken; secret: string }>('POST', '/me/tokens', { name, expires_in_days }),
   deleteToken: (id: string) => request<void>('DELETE', `/me/tokens/${id}`),
+
+  invites: () => request<Invite[]>('GET', '/invites'),
+  createInvite: (note: string, expires_in_days?: number) =>
+    request<{ invite: Invite; secret: string; url: string }>('POST', '/invites', { note, expires_in_days }),
+  deleteInvite: (id: string) => request<void>('DELETE', `/invites/${id}`),
 
   issues: (app: string, status = 'active') => request<Issue[]>('GET', `/apps/${app}/issues${q({ status })}`),
   issue: (app: string, n: number) => request<{ issue: Issue; links: LinkView[] }>('GET', `/apps/${app}/issues/${n}`),

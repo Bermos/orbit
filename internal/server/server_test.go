@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Bermos/orbit/internal/db"
 	"github.com/Bermos/orbit/internal/gitrepo"
@@ -42,6 +44,10 @@ func newTestServerWithAPI(t *testing.T) (*httptest.Server, *Server) {
 		t.Fatal(err)
 	}
 	srv := New(pool, gitrepo.Store{Root: t.TempDir()}, nil, "")
+	// Tests sign up freely and send webhooks to local receivers.
+	srv.Registration = RegistrationOpen
+	srv.WebhookAllowedNetworks = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	srv.limits.register = newLimiter(1000, time.Hour)
 	ts := httptest.NewServer(srv.Routes())
 	srv.BaseURL = ts.URL
 	t.Cleanup(ts.Close)
